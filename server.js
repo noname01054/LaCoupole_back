@@ -19,7 +19,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret_key';
 if (!process.env.JWT_SECRET) {
   logger.warn('JWT_SECRET not set, using default value');
 }
-const CLIENT_URL = process.env.CLIENT_URL || 'https://coffe-front-production-c5bf.up.railway.app';
+const CLIENT_URL = process.env.CLIENT_URL || 'https://la-coupole.vercel.app';
 if (!process.env.CLIENT_URL) {
   logger.warn('CLIENT_URL not set, defaulting to production frontend URL');
 }
@@ -184,7 +184,6 @@ app.use('/api', themeRoutes);
 
 // Apply validations middleware only for protected endpoints
 app.use('/api', (req, res, next) => {
-  // Skip validation for public GET endpoints
   if (req.method === 'GET' && (
     req.path.includes('/menu-items') ||
     req.path.includes('/categories') ||
