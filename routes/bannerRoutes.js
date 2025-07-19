@@ -4,23 +4,19 @@ const db = require('../config/db');
 const logger = require('../logger');
 const jwt = require('jsonwebtoken');
 const multer = require('multer');
-const path = require('path');
-const fs = require('fs').promises;
+const { v2: cloudinary } = require('cloudinary');
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
 
-// Ensure upload directory exists
-const uploadDir = '/app/public/uploads';
-fs.mkdir(uploadDir, { recursive: true }).catch(err => {
-  logger.error('Failed to create uploads directory', { error: err.message });
-});
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadDir);
-  },
-  filename: (req, file, cb) => {
-    cb(null, `${Date.now()}-${file.originalname}`);
+// Configure Cloudinary storage for multer
+const storage = new CloudinaryStorage({
+  cloudinary: cloudinary,
+  params: {
+    folder: 'Uploads/Banners',
+    allowed_formats: ['jpg', 'jpeg', 'png'],
+    public_id: (req, file) => `${Date.now()}-${file.originalname}`,
   },
 });
+
 const upload = multer({
   storage,
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
@@ -45,7 +41,7 @@ router.post('/banners', upload, async (req, res) => {
   const image = req.file;
   logger.info('Parsed banner creation request', {
     body: req.body,
-    file: image ? { name: image.filename, path: image.path } : null,
+    file: image ? { public_id: image.public_id, url: image.path } : null,
     authenticatedUser: req.user,
   });
   try {
@@ -69,7 +65,7 @@ router.post('/banners', upload, async (req, res) => {
       logger.warn('Missing banner image', { user_id });
       return res.status(400).json({ error: 'Banner image is required' });
     }
-    const image_url = `/uploads/${image.filename}`;
+    const image_url = image.path; // Cloudinary URL
     const parsedIsEnabled = is_enabled === 'true' || is_enabled === true;
     const [result] = await db.query(
       'INSERT INTO banners (image_url, link, is_enabled, admin_id) VALUES (?, ?, ?, ?)',
@@ -91,7 +87,7 @@ router.put('/banners/:id', upload, async (req, res) => {
   logger.info('Parsed banner update request', {
     params: { id },
     body: req.body,
-    file: image ? { name: image.filename, path: image.path } : null,
+    file: image ? { public_id: image.public_id, url: image.path } : null,
     authenticatedUser: req.user,
   });
   try {
@@ -121,18 +117,17 @@ router.put('/banners/:id', upload, async (req, res) => {
       logger.warn('Banner not found', { id: bannerId });
       return res.status(404).json({ error: 'Banner not found' });
     }
-    const image_url = image ? `/uploads/${image.filename}` : existing[0].image_url;
+    const image_url = image ? image.path : existing[0].image_url; // Use Cloudinary URL
     if (image && existing[0].image_url) {
-      const oldImagePath = path.join('/app/public/uploads', path.basename(existing[0].image_url));
+      const oldPublicId = existing[0].image_url.split('/').pop().split('.')[0];
       try {
-        await fs.unlink(oldImagePath);
+        await cloudinary.uploader.destroy(`Uploads/Banners/${oldPublicId}`);
+        logger.info('Old banner image deleted from Cloudinary', { public_id: oldPublicId });
       } catch (err) {
-        if (err.code !== 'ENOENT') {
-          logger.error('Error deleting old banner image', { error: err.message, path: oldImagePath });
-        }
+        logger.error('Error deleting old banner image from Cloudinary', { error: err.message, public_id: oldPublicId });
       }
     }
-    const updateFields = [link.trim(), parsedIsEnabled, user_id, image_url, bannerId];
+    const updateFields = [link.trim(), is_enabled === 'true' || is_enabled === true, user_id, image_url, bannerId];
     const query = 'UPDATE banners SET link = ?, is_enabled = ?, admin_id = ?, image_url = ? WHERE id = ?';
     const [result] = await db.query(query, updateFields);
     if (result.affectedRows === 0) {
@@ -172,13 +167,12 @@ router.delete('/banners/:id', async (req, res) => {
     }
     const [existing] = await db.query('SELECT image_url FROM banners WHERE id = ?', [bannerId]);
     if (existing.length && existing[0].image_url) {
-      const imagePath = path.join('/app/public/uploads', path.basename(existing[0].image_url));
+      const publicId = existing[0].image_url.split('/').pop().split('.')[0];
       try {
-        await fs.unlink(imagePath);
+        await cloudinary.uploader.destroy(`Uploads/Banners/${publicId}`);
+        logger.info('Banner image deleted from Cloudinary', { public_id: publicId });
       } catch (err) {
-        if (err.code !== 'ENOENT') {
-          logger.error('Error deleting banner image', { error: err.message, path: imagePath });
-        }
+        logger.error('Error deleting banner image from Cloudinary', { error: err.message, public_id: publicId });
       }
     }
     const [result] = await db.query('DELETE FROM banners WHERE id = ?', [bannerId]);
