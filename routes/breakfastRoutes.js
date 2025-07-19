@@ -4,25 +4,20 @@ const db = require('../config/db');
 const logger = require('../logger');
 const jwt = require('jsonwebtoken');
 const multer = require('multer');
-const path = require('path');
-const fs = require('fs').promises;
+const { v2: cloudinary } = require('cloudinary');
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const breakfastValidation = require('../middleware/breakfastValidation');
 
-// Ensure upload directory exists
-const uploadDir = '/app/public/uploads';
-fs.mkdir(uploadDir, { recursive: true }).catch(err => {
-  logger.error('Failed to create uploads directory', { error: err.message });
+// Configure Cloudinary storage for multer
+const storage = new CloudinaryStorage({
+  cloudinary: cloudinary,
+  params: {
+    folder: 'Uploads/Breakfast',
+    allowed_formats: ['jpg', 'jpeg', 'png'],
+    public_id: (req, file) => `${Date.now()}-${file.originalname}`,
+  },
 });
 
-// Configure multer for file uploads
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadDir);
-  },
-  filename: (req, file, cb) => {
-    cb(null, `${Date.now()}-${file.originalname}`);
-  },
-});
 const upload = multer({
   storage,
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
@@ -69,7 +64,7 @@ const logFormData = (req, res, next) => {
       method: req.method,
       url: req.url,
       formData,
-      file: req.file ? { name: req.file.filename, path: req.file.path } : null,
+      file: req.file ? { public_id: req.file.public_id, url: req.file.path } : null,
     });
   } else if (req.headers['content-type']?.includes('application/json')) {
     logger.info('Raw JSON request', {
@@ -88,7 +83,7 @@ router.post('/breakfasts', checkAdmin, breakfastValidation, upload, logFormData,
   const image = req.file;
   logger.info('Parsed breakfast creation request', {
     body: { name, description, price, availability, category_id, option_groups, reusable_option_groups },
-    file: image ? { name: image.filename, path: image.path } : null,
+    file: image ? { public_id: image.public_id, url: image.path } : null,
   });
   const connection = await db.getConnection();
   try {
@@ -97,7 +92,7 @@ router.post('/breakfasts', checkAdmin, breakfastValidation, upload, logFormData,
     const finalPrice = price && !isNaN(parseFloat(price)) && parseFloat(price) >= 0.01 ? parseFloat(price) : 0.01;
     const parsedAvailability = availability === 'true' || availability === true;
     const parsedCategoryId = category_id ? parseInt(category_id) : null;
-    const image_url = image ? `/Uploads/${image.filename}` : null;
+    const image_url = image ? image.path : null; // Cloudinary URL
 
     const [result] = await connection.query(
       'INSERT INTO breakfasts (name, description, price, image_url, availability, category_id) VALUES (?, ?, ?, ?, ?, ?)',
@@ -161,7 +156,7 @@ router.put('/breakfasts/:id', checkAdmin, breakfastValidation, upload, logFormDa
   logger.info('Parsed breakfast update request', {
     params: { id },
     body: { name, description, price, availability, category_id, option_groups, reusable_option_groups },
-    file: image ? { name: image.filename, path: image.path } : null,
+    file: image ? { public_id: image.public_id, url: image.path } : null,
   });
   const connection = await db.getConnection();
   try {
@@ -182,15 +177,14 @@ router.put('/breakfasts/:id', checkAdmin, breakfastValidation, upload, logFormDa
     const finalPrice = price && !isNaN(parseFloat(price)) && parseFloat(price) >= 0.01 ? parseFloat(price) : 0.01;
     const parsedAvailability = availability === 'true' || availability === true;
     const parsedCategoryId = category_id ? parseInt(category_id) : null;
-    const image_url = image ? `/Uploads/${image.filename}` : existing[0].image_url;
+    const image_url = image ? image.path : existing[0].image_url; // Cloudinary URL
     if (image && existing[0].image_url) {
-      const oldImagePath = path.join('/app/public/uploads', path.basename(existing[0].image_url));
+      const oldPublicId = existing[0].image_url.split('/').pop().split('.')[0];
       try {
-        await fs.unlink(oldImagePath);
+        await cloudinary.uploader.destroy(`Uploads/Breakfast/${oldPublicId}`);
+        logger.info('Old breakfast image deleted from Cloudinary', { public_id: oldPublicId });
       } catch (err) {
-        if (err.code !== 'ENOENT') {
-          logger.error('Error deleting old breakfast image', { error: err.message, path: oldImagePath });
-        }
+        logger.error('Error deleting old breakfast image from Cloudinary', { error: err.message, public_id: oldPublicId });
       }
     }
     const updateFields = [finalName, description || null, finalPrice, parsedAvailability, parsedCategoryId];
@@ -269,13 +263,12 @@ router.delete('/breakfasts/:id', checkAdmin, breakfastValidation, async (req, re
       return res.status(404).json({ error: 'Breakfast not found' });
     }
     if (existing[0].image_url) {
-      const imagePath = path.join('/app/public/uploads', path.basename(existing[0].image_url));
+      const publicId = existing[0].image_url.split('/').pop().split('.')[0];
       try {
-        await fs.unlink(imagePath);
+        await cloudinary.uploader.destroy(`Uploads/Breakfast/${publicId}`);
+        logger.info('Breakfast image deleted from Cloudinary', { public_id: publicId });
       } catch (err) {
-        if (err.code !== 'ENOENT') {
-          logger.error('Error deleting breakfast image', { error: err.message, path: imagePath });
-        }
+        logger.error('Error deleting breakfast image from Cloudinary', { error: err.message, public_id: publicId });
       }
     }
     await connection.query('DELETE FROM breakfast_options WHERE breakfast_id = ?', [breakfastId]);
