@@ -6,43 +6,43 @@ let pool;
 
 try {
   pool = mysql.createPool({
-    host: process.env.DB_HOST || 'mysql.railway.internal',
-    port: parseInt(process.env.DB_PORT) || 3306,
-    user: process.env.DB_USER || 'root',
-    password: process.env.DB_PASSWORD || 'EGBnnTbtJEpUmdIpKjtFaEsvEERWwcyB',
-    database: process.env.DB_NAME || 'railway',
+    host: process.env.MYSQLHOST || 'mysql.railway.internal',
+    port: parseInt(process.env.MYSQLPORT) || 3306,
+    user: process.env.MYSQLUSER || 'root',
+    password: process.env.MYSQLPASSWORD || 'AfZyWTWkhvuWmFabVjeTeZhDgEyOfofL',
+    database: process.env.MYSQLDATABASE || 'railway',
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0,
-    connectTimeout: 10000, // Added timeout for connection
+    connectTimeout: 10000,
   });
 
   pool.getConnection()
     .then((conn) => {
       logger.info('Database connected successfully', {
-        host: process.env.DB_HOST,
-        port: process.env.DB_PORT,
-        database: process.env.DB_NAME,
+        host: process.env.MYSQLHOST,
+        port: process.env.MYSQLPORT,
+        database: process.env.MYSQLDATABASE,
       });
       conn.release();
     })
     .catch((err) => {
       logger.error('Database connection failed', {
         error: err.message,
-        host: process.env.DB_HOST,
-        port: process.env.DB_PORT,
-        user: process.env.DB_USER,
-        database: process.env.DB_NAME,
+        host: process.env.MYSQLHOST,
+        port: process.env.MYSQLPORT,
+        user: process.env.MYSQLUSER,
+        database: process.env.MYSQLDATABASE,
       });
       throw err;
     });
 } catch (err) {
   logger.error('Error initializing database pool', {
     error: err.message,
-    host: process.env.DB_HOST,
-    port: process.env.DB_PORT,
-    user: process.env.DB_USER,
-    database: process.env.DB_NAME,
+    host: process.env.MYSQLHOST,
+    port: process.env.MYSQLPORT,
+    user: process.env.MYSQLUSER,
+    database: process.env.MYSQLDATABASE,
   });
   throw err;
 }
