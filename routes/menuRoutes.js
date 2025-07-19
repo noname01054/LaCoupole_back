@@ -4,24 +4,19 @@ const db = require('../config/db');
 const logger = require('../logger');
 const jwt = require('jsonwebtoken');
 const multer = require('multer');
-const path = require('path');
-const fs = require('fs').promises;
+const { v2: cloudinary } = require('cloudinary');
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
 
-// Ensure upload directory exists
-const uploadDir = '/app/public/uploads';
-fs.mkdir(uploadDir, { recursive: true }).catch(err => {
-  logger.error('Failed to create uploads directory', { error: err.message });
-});
-
-// Configure multer for file uploads
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadDir);
-  },
-  filename: (req, file, cb) => {
-    cb(null, `${Date.now()}-${file.originalname}`);
+// Configure Cloudinary storage for multer
+const storage = new CloudinaryStorage({
+  cloudinary: cloudinary,
+  params: {
+    folder: 'Uploads/Menu',
+    allowed_formats: ['jpg', 'jpeg', 'png'],
+    public_id: (req, file) => `${Date.now()}-${file.originalname}`,
   },
 });
+
 const upload = multer({
   storage,
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
@@ -58,7 +53,7 @@ router.post('/categories', logFormData, upload, async (req, res) => {
   const image = req.file;
   logger.info('Parsed category creation request', {
     body: req.body,
-    file: image ? { name: image.filename, path: image.path } : null,
+    file: image ? { public_id: image.public_id, url: image.path } : null,
   });
   try {
     if (!req.user || req.user.id !== parseInt(user_id) || !await checkAdmin(user_id)) {
@@ -69,7 +64,7 @@ router.post('/categories', logFormData, upload, async (req, res) => {
       logger.warn('Missing category name', { user_id });
       return res.status(400).json({ error: 'Category name is required' });
     }
-    const image_url = image ? `/uploads/${image.filename}` : null;
+    const image_url = image ? image.path : null; // Cloudinary URL
     const parsedIsTop = is_top === 'true' || is_top === true ? 1 : 0;
     const [result] = await db.query(
       'INSERT INTO categories (name, description, image_url, is_top) VALUES (?, ?, ?, ?)',
@@ -91,7 +86,7 @@ router.put('/categories/:id', logFormData, upload, async (req, res) => {
   logger.info('Parsed category update request', {
     params: { id },
     body: req.body,
-    file: image ? { name: image.filename, path: image.path } : null,
+    file: image ? { public_id: image.public_id, url: image.path } : null,
   });
   try {
     if (!req.user || req.user.id !== parseInt(user_id) || !await checkAdmin(user_id)) {
@@ -107,18 +102,17 @@ router.put('/categories/:id', logFormData, upload, async (req, res) => {
       logger.warn('Missing category name', { user_id });
       return res.status(400).json({ error: 'Category name is required' });
     }
-    const image_url = image ? `/uploads/${image.filename}` : null;
-    // Delete old image if new image is uploaded
+    const image_url = image ? image.path : null; // Cloudinary URL
+    // Delete old image from Cloudinary if new image is uploaded
     if (image_url) {
       const [existing] = await db.query('SELECT image_url FROM categories WHERE id = ?', [categoryId]);
       if (existing.length && existing[0].image_url) {
-        const oldImagePath = path.join('/app/public/uploads', path.basename(existing[0].image_url));
+        const oldPublicId = existing[0].image_url.split('/').pop().split('.')[0];
         try {
-          await fs.unlink(oldImagePath);
+          await cloudinary.uploader.destroy(`Uploads/Menu/${oldPublicId}`);
+          logger.info('Old category image deleted from Cloudinary', { public_id: oldPublicId });
         } catch (err) {
-          if (err.code !== 'ENOENT') {
-            logger.error('Error deleting old category image', { error: err.message, path: oldImagePath });
-          }
+          logger.error('Error deleting old category image from Cloudinary', { error: err.message, public_id: oldPublicId });
         }
       }
     }
@@ -156,16 +150,15 @@ router.delete('/categories/:id', async (req, res) => {
       logger.warn('Invalid category ID', { id });
       return res.status(400).json({ error: 'Valid category ID is required' });
     }
-    // Delete associated image
+    // Delete associated image from Cloudinary
     const [existing] = await db.query('SELECT image_url FROM categories WHERE id = ?', [categoryId]);
     if (existing.length && existing[0].image_url) {
-      const imagePath = path.join('/app/public/uploads', path.basename(existing[0].image_url));
+      const publicId = existing[0].image_url.split('/').pop().split('.')[0];
       try {
-        await fs.unlink(imagePath);
+        await cloudinary.uploader.destroy(`Uploads/Menu/${publicId}`);
+        logger.info('Category image deleted from Cloudinary', { public_id: publicId });
       } catch (err) {
-        if (err.code !== 'ENOENT') {
-          logger.error('Error deleting category image', { error: err.message, path: imagePath });
-        }
+        logger.error('Error deleting category image from Cloudinary', { error: err.message, public_id: publicId });
       }
     }
     const [result] = await db.query('DELETE FROM categories WHERE id = ?', [categoryId]);
@@ -254,7 +247,7 @@ router.post('/menu-items', logFormData, upload, async (req, res) => {
   const image = req.file;
   logger.info('Parsed menu item creation request', {
     body: req.body,
-    file: image ? { name: image.filename, path: image.path } : null,
+    file: image ? { public_id: image.public_id, url: image.path } : null,
   });
   try {
     if (!req.user || req.user.id !== parseInt(user_id) || !await checkAdmin(user_id)) {
@@ -291,7 +284,7 @@ router.post('/menu-items', logFormData, upload, async (req, res) => {
       logger.warn('Invalid sale price', { sale_price });
       return res.status(400).json({ error: 'Sale price must be a non-negative number' });
     }
-    const image_url = image ? `/uploads/${image.filename}` : null;
+    const image_url = image ? image.path : null; // Cloudinary URL
     const [result] = await db.query(
       'INSERT INTO menu_items (name, description, regular_price, sale_price, category_id, image_url, availability, dietary_tags, is_best_seller) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
       [name.trim(), description || null, parsedRegularPrice, parsedSalePrice, parsedCategoryId, image_url, parsedAvailability, JSON.stringify(parsedDietaryTags), parsedIsBestSeller]
@@ -312,7 +305,7 @@ router.put('/menu-items/:id', logFormData, upload, async (req, res) => {
   logger.info('Parsed menu item update request', {
     params: { id },
     body: req.body,
-    file: image ? { name: image.filename, path: image.path } : null,
+    file: image ? { public_id: image.public_id, url: image.path } : null,
   });
   try {
     if (!req.user || req.user.id !== parseInt(user_id) || !await checkAdmin(user_id)) {
@@ -359,16 +352,15 @@ router.put('/menu-items/:id', logFormData, upload, async (req, res) => {
       logger.warn('Menu item not found', { id: itemId });
       return res.status(404).json({ error: 'Menu item not found' });
     }
-    // Delete old image if new image is uploaded
-    const image_url = image ? `/uploads/${image.filename}` : existing[0].image_url;
+    // Delete old image from Cloudinary if new image is uploaded
+    const image_url = image ? image.path : existing[0].image_url; // Cloudinary URL
     if (image && existing[0].image_url) {
-      const oldImagePath = path.join('/app/public/uploads', path.basename(existing[0].image_url));
+      const oldPublicId = existing[0].image_url.split('/').pop().split('.')[0];
       try {
-        await fs.unlink(oldImagePath);
+        await cloudinary.uploader.destroy(`Uploads/Menu/${oldPublicId}`);
+        logger.info('Old menu item image deleted from Cloudinary', { public_id: oldPublicId });
       } catch (err) {
-        if (err.code !== 'ENOENT') {
-          logger.error('Error deleting old menu item image', { error: err.message, path: oldImagePath });
-        }
+        logger.error('Error deleting old menu item image from Cloudinary', { error: err.message, public_id: oldPublicId });
       }
     }
     const updateFields = [
@@ -416,15 +408,14 @@ router.delete('/menu-items/:id', async (req, res) => {
       logger.warn('Menu item not found', { id: itemId });
       return res.status(404).json({ error: 'Menu item not found' });
     }
-    // Delete associated image
+    // Delete associated image from Cloudinary
     if (existing[0].image_url) {
-      const imagePath = path.join('/app/public/uploads', path.basename(existing[0].image_url));
+      const publicId = existing[0].image_url.split('/').pop().split('.')[0];
       try {
-        await fs.unlink(imagePath);
+        await cloudinary.uploader.destroy(`Uploads/Menu/${publicId}`);
+        logger.info('Menu item image deleted from Cloudinary', { public_id: publicId });
       } catch (err) {
-        if (err.code !== 'ENOENT') {
-          logger.error('Error deleting menu item image', { error: err.message, path: imagePath });
-        }
+        logger.error('Error deleting menu item image from Cloudinary', { error: err.message, public_id: publicId });
       }
     }
     const [result] = await db.query('DELETE FROM menu_items WHERE id = ?', [itemId]);
