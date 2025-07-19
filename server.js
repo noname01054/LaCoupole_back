@@ -12,6 +12,10 @@ const { v2: cloudinary } = require('cloudinary');
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const multer = require('multer');
 
+// Initialize express app first
+const app = express();
+const server = http.createServer(app);
+
 // Configure Cloudinary
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME || 'dbvbbtekw',
@@ -19,21 +23,11 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET || '_SDgvc8l9rl5lS7rf8KXazaYwr0',
 });
 
-// Validate critical environment variables
-const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret_key';
-if (!process.env.JWT_SECRET) {
-  logger.warn('JWT_SECRET not set, using default value');
-}
-const CLIENT_URL = process.env.CLIENT_URL || 'https://la-coupole.vercel.app';
-if (!process.env.CLIENT_URL) {
-  logger.warn('CLIENT_URL not set, defaulting to production frontend URL');
-}
-
 // Configure multer with Cloudinary storage
 const storage = new CloudinaryStorage({
   cloudinary: cloudinary,
   params: {
-    folder: 'uploads',
+    folder: 'Uploads',
     allowed_formats: ['jpg', 'jpeg', 'png', 'ico'],
     public_id: (req, file) => `${Date.now()}-${file.originalname}`,
   },
@@ -55,8 +49,15 @@ const upload = multer({
 
 app.set('upload', upload);
 
-const app = express();
-const server = http.createServer(app);
+// Validate critical environment variables
+const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret_key';
+if (!process.env.JWT_SECRET) {
+  logger.warn('JWT_SECRET not set, using default value');
+}
+const CLIENT_URL = process.env.CLIENT_URL || 'https://la-coupole.vercel.app';
+if (!process.env.CLIENT_URL) {
+  logger.warn('CLIENT_URL not set, defaulting to production frontend URL');
+}
 
 // Configure allowed origins for CORS
 const allowedOrigins = [
@@ -116,7 +117,7 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Serve Cloudinary images (no local uploads directory needed anymore)
+// Serve Cloudinary images
 app.get('/uploads/:publicId', async (req, res) => {
   try {
     const { publicId } = req.params;
