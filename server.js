@@ -8,11 +8,16 @@ const logger = require('./logger');
 const db = require('./config/db');
 const validate = require('./middleware/validate');
 const themeValidate = require('./middleware/themeValidate');
-const fs = require('fs').promises;
+const { v2: cloudinary } = require('cloudinary');
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const multer = require('multer');
 
-const app = express();
-const server = http.createServer(app);
+// Configure Cloudinary
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME || 'dbvbbtekw',
+  api_key: process.env.CLOUDINARY_API_KEY || '156121837471457',
+  api_secret: process.env.CLOUDINARY_API_SECRET || '_SDgvc8l9rl5lS7rf8KXazaYwr0',
+});
 
 // Validate critical environment variables
 const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret_key';
@@ -24,30 +29,13 @@ if (!process.env.CLIENT_URL) {
   logger.warn('CLIENT_URL not set, defaulting to production frontend URL');
 }
 
-// Ensure upload directory exists and is writable
-const uploadDir = '/app/public/uploads';
-fs.mkdir(uploadDir, { recursive: true })
-  .then(async () => {
-    try {
-      const testFile = path.join(uploadDir, '.test-write');
-      await fs.writeFile(testFile, 'test');
-      await fs.unlink(testFile);
-      logger.info('Upload directory created and writable', { path: uploadDir });
-    } catch (err) {
-      logger.error('Upload directory not writable', { error: err.message, path: uploadDir });
-    }
-  })
-  .catch(err => {
-    logger.error('Failed to create uploads directory', { error: err.message });
-  });
-
-// Configure multer for file uploads
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadDir);
-  },
-  filename: (req, file, cb) => {
-    cb(null, `${Date.now()}-${file.originalname}`);
+// Configure multer with Cloudinary storage
+const storage = new CloudinaryStorage({
+  cloudinary: cloudinary,
+  params: {
+    folder: 'uploads',
+    allowed_formats: ['jpg', 'jpeg', 'png', 'ico'],
+    public_id: (req, file) => `${Date.now()}-${file.originalname}`,
   },
 });
 
@@ -66,6 +54,9 @@ const upload = multer({
 });
 
 app.set('upload', upload);
+
+const app = express();
+const server = http.createServer(app);
 
 // Configure allowed origins for CORS
 const allowedOrigins = [
@@ -125,8 +116,19 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Serve the 'uploads' directory for images
-app.use(['/uploads', '/Uploads'], express.static(path.join(__dirname, 'public/uploads')));
+// Serve Cloudinary images (no local uploads directory needed anymore)
+app.get('/uploads/:publicId', async (req, res) => {
+  try {
+    const { publicId } = req.params;
+    const imageUrl = cloudinary.url(`Uploads/${publicId}`, {
+      secure: true,
+    });
+    res.redirect(imageUrl);
+  } catch (error) {
+    logger.error('Error redirecting to Cloudinary image', { error: error.message });
+    res.status(500).json({ error: 'Failed to fetch image' });
+  }
+});
 
 // JWT Middleware
 app.use((req, res, next) => {
@@ -218,15 +220,23 @@ app.use('/api', (req, res, next) => {
   next();
 });
 
-// Debug route to list all files in uploads directory
+// Debug route to list all Cloudinary uploads
 app.get('/api/debug/uploads', async (req, res) => {
   try {
-    const files = await fs.readdir(uploadDir);
-    logger.info('Listing files in uploads directory', { files, uploadDir });
+    const result = await cloudinary.api.resources({
+      resource_type: 'image',
+      prefix: 'Uploads',
+      max_results: 100,
+    });
+    const files = result.resources.map(resource => ({
+      public_id: resource.public_id,
+      url: resource.secure_url,
+    }));
+    logger.info('Listing Cloudinary uploads', { count: files.length });
     res.json({ files });
   } catch (error) {
-    logger.error('Error listing uploads directory', { error: error.message });
-    res.status(500).json({ error: 'Failed to list uploads directory' });
+    logger.error('Error listing Cloudinary uploads', { error: error.message });
+    res.status(500).json({ error: 'Failed to list uploads' });
   }
 });
 
