@@ -45,6 +45,159 @@ module.exports = (io) => {
     }
   });
 
+  router.post('/tables/bulk', [
+    body('user_id').isInt({ min: 1 }).withMessage('Valid user ID is required'),
+    body('start_number').isInt({ min: 1 }).withMessage('Start table number must be a positive number'),
+    body('end_number').isInt({ min: 1 }).withMessage('End table number must be a positive number'),
+    body('capacity').isInt({ min: 1 }).withMessage('Capacity must be a positive number'),
+  ], async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      logger.warn('Validation errors for bulk table creation', { errors: errors.array() });
+      return res.status(400).json({ errors: errors.array() });
+    }
+    const { user_id, start_number, end_number, capacity } = req.body;
+    try {
+      if (!req.user || req.user.id !== parseInt(user_id) || !await checkRole(user_id, ['admin'])) {
+        logger.warn('Unauthorized attempt to bulk add tables', { user_id, authenticatedUser: req.user });
+        return res.status(403).json({ error: 'Admin access required' });
+      }
+      if (start_number > end_number) {
+        logger.warn('Invalid table number range', { start_number, end_number });
+        return res.status(400).json({ error: 'Start number must be less than or equal to end number' });
+      }
+      const tableCount = end_number - start_number + 1;
+      if (tableCount > 500) {
+        logger.warn('Too many tables requested', { tableCount });
+        return res.status(400).json({ error: 'Cannot create more than 500 tables at once' });
+      }
+
+      // Check for existing table numbers
+      const [existingTables] = await db.query(
+        'SELECT table_number FROM tables WHERE table_number BETWEEN ? AND ?',
+        [start_number, end_number]
+      );
+      if (existingTables.length > 0) {
+        const existingNumbers = existingTables.map(t => t.table_number);
+        logger.warn('Some table numbers already exist', { existingNumbers });
+        return res.status(400).json({ 
+          error: `Table numbers already exist: ${existingNumbers.join(', ')}`
+        });
+      }
+
+      // Prepare bulk insert
+      const values = [];
+      const placeholders = [];
+      for (let i = start_number; i <= end_number; i++) {
+        values.push(i, capacity, 'available');
+        placeholders.push('(?, ?, ?)');
+      }
+      
+      const [result] = await db.query(
+        `INSERT INTO tables (table_number, capacity, status) VALUES ${placeholders.join(', ')}`,
+        values
+      );
+      
+      logger.info('Bulk tables created', { 
+        count: result.affectedRows, 
+        start_number, 
+        end_number,
+        first_id: result.insertId 
+      });
+      
+      // Emit socket updates for each new table
+      for (let i = 0; i < tableCount; i++) {
+        io.emit('tableStatusUpdate', { 
+          table_id: result.insertId + i, 
+          status: 'available' 
+        });
+      }
+
+      res.status(201).json({ 
+        message: `Created ${result.affectedRows} tables`, 
+        first_id: result.insertId 
+      });
+    } catch (error) {
+      logger.error('Error creating bulk tables', { 
+        error: error.message, 
+        start_number, 
+        end_number, 
+        capacity 
+      });
+      res.status(500).json({ error: 'Failed to create tables' });
+    }
+  });
+
+  router.delete('/tables/bulk', [
+    body('user_id').isInt({ min: 1 }).withMessage('Valid user ID is required'),
+    body('start_number').isInt({ min: 1 }).withMessage('Start table number must be a positive number'),
+    body('end_number').isInt({ min: 1 }).withMessage('End table number must be a positive number'),
+  ], async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      logger.warn('Validation errors for bulk table deletion', { errors: errors.array() });
+      return res.status(400).json({ errors: errors.array() });
+    }
+    const { user_id, start_number, end_number } = req.body;
+    try {
+      if (!req.user || req.user.id !== parseInt(user_id) || !await checkRole(user_id, ['admin'])) {
+        logger.warn('Unauthorized attempt to bulk delete tables', { user_id, authenticatedUser: req.user });
+        return res.status(403).json({ error: 'Admin access required' });
+      }
+      if (start_number > end_number) {
+        logger.warn('Invalid table number range', { start_number, end_number });
+        return res.status(400).json({ error: 'Start number must be less than or equal to end number' });
+      }
+
+      // Check for existing reservations
+      const [reservations] = await db.query(
+        'SELECT r.id FROM reservations r JOIN tables t ON r.table_id = t.id WHERE t.table_number BETWEEN ? AND ?',
+        [start_number, end_number]
+      );
+      if (reservations.length > 0) {
+        logger.warn('Cannot delete tables with active reservations', { reservationIds: reservations.map(r => r.id) });
+        return res.status(400).json({ error: 'Cannot delete tables with active reservations' });
+      }
+
+      const [tables] = await db.query(
+        'SELECT id FROM tables WHERE table_number BETWEEN ? AND ?',
+        [start_number, end_number]
+      );
+      
+      if (tables.length === 0) {
+        logger.warn('No tables found in range', { start_number, end_number });
+        return res.status(404).json({ error: 'No tables found in specified range' });
+      }
+
+      const [result] = await db.query(
+        'DELETE FROM tables WHERE table_number BETWEEN ? AND ?',
+        [start_number, end_number]
+      );
+
+      // Emit socket updates for deleted tables
+      tables.forEach(table => {
+        io.emit('tableStatusUpdate', { 
+          table_id: table.id, 
+          status: 'deleted' 
+        });
+      });
+
+      logger.info('Bulk tables deleted', { 
+        count: result.affectedRows, 
+        start_number, 
+        end_number 
+      });
+      res.json({ message: `Deleted ${result.affectedRows} tables` });
+    } catch (error) {
+      logger.error('Error deleting bulk tables', { 
+        error: error.message, 
+        start_number, 
+        end_number 
+      });
+      res.status(500).json({ error: 'Failed to delete tables' });
+    }
+  });
+
   router.put('/tables/:id', async (req, res) => {
     const { user_id, table_number, capacity, status, reserved_until } = req.body;
     const { id } = req.params;
@@ -121,6 +274,7 @@ module.exports = (io) => {
         return res.status(404).json({ error: 'Table not found' });
       }
       logger.info('Table deleted', { id: tableId });
+      io.emit('tableStatusUpdate', { table_id: tableId, status: 'deleted' });
       res.json({ message: 'Table deleted' });
     } catch (error) {
       logger.error('Error deleting table', { error: error.message, id });
