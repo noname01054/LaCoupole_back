@@ -360,8 +360,8 @@ module.exports = (io) => {
 
         // Record the order attempt in device_order_limits
         await connection.query(
-          'INSERT INTO device_order_limits (device_fingerprint, order_timestamp, device_id) VALUES (?, ?, ?)',
-          [deviceFingerprint, new Date(), deviceId]
+          'INSERT INTO device_order_limits (device_fingerprint, order_timestamp) VALUES (?, ?)',
+          [deviceFingerprint, new Date()]
         );
 
         if (items && Array.isArray(items)) {
@@ -436,6 +436,8 @@ module.exports = (io) => {
 
         const [rows] = await connection.query('SELECT * FROM notifications WHERE id = ?', [notificationId]);
         const notification = rows[0];
+
+
 
         await connection.commit();
 
@@ -632,7 +634,7 @@ module.exports = (io) => {
       }
 
       if (approved !== 1 && approved !== 0) {
-        logger.warn('Invalid approved value', { orderId, approved, sessionId, explorer });
+        logger.warn('Invalid approved value', { orderId, approved, sessionId, timestamp });
         return res.status(400).json({ error: 'Invalid approved value' });
       }
 
