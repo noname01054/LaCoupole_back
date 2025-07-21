@@ -18,21 +18,15 @@ module.exports = (io) => {
   router.post('/orders', async (req, res) => {
     const { items, breakfastItems, total_price, order_type, delivery_address, promotion_id, table_id, request_id, notes } = req.body;
     const sessionId = req.headers['x-session-id'] || req.sessionID;
-    const deviceId = req.headers['x-device-id'];
+    const deviceId = req.headers['x-device-id'] || 'unknown';
     const userAgent = req.headers['user-agent'] || 'unknown';
     const ipAddress = req.headers['x-forwarded-for'] || req.ip || 'unknown';
     const timestamp = new Date().toISOString();
 
-    // Validate deviceId
-    if (!deviceId || typeof deviceId !== 'string' || !deviceId.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)) {
-      logger.warn('Invalid or missing deviceId', { sessionId, timestamp });
-      return res.status(400).json({ error: 'Valid device ID is required' });
-    }
-
-    // Use deviceId as the device fingerprint
+    // Generate device fingerprint
     const deviceFingerprint = crypto
       .createHash('sha256')
-      .update(deviceId)
+      .update(`${ipAddress}:${userAgent}:${deviceId}`)
       .digest('hex');
 
     logger.info('Received order request', {
@@ -208,7 +202,7 @@ module.exports = (io) => {
             }
             const selectedGroups = new Set(options.map(opt => opt.group_id));
             const requiredGroups = groups.filter(g => g.is_required).map(g => g.id);
-            const missingRequiredGroups = requiredGroups.filter(g => !selectedurrentGroups.has(g));
+            const missingRequiredGroups = requiredGroups.filter(g => !selectedGroups.has(g));
             if (missingRequiredGroups.length > 0) {
               const missingGroupTitles = groups
                 .filter(g => missingRequiredGroups.includes(g.id))
