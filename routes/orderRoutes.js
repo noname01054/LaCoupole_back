@@ -583,7 +583,7 @@ module.exports = (io) => {
                GROUP_CONCAT(DISTINCT b.name) AS breakfast_names,
                GROUP_CONCAT(DISTINCT b.image_url) AS breakfast_images,
                GROUP_CONCAT(boo.breakfast_option_id) AS breakfast_option_ids,
-               GROUP_CONCAT(bo.option_name) AS breakfast_option(names,
+               GROUP_CONCAT(bo.option_name) AS breakfast_option_names,
                GROUP_CONCAT(bo.additional_price) AS breakfast_option_prices
         FROM orders o
         LEFT JOIN order_items oi ON o.id = oi.order_id
