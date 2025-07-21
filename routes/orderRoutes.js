@@ -30,10 +30,13 @@ module.exports = (io) => {
       return res.status(400).json({ error: 'Valid device ID is required' });
     }
 
-    // Generate device fingerprint
+    // Log fingerprint inputs for debugging
+    logger.debug('Device fingerprint inputs', { ipAddress, userAgent, deviceId, sessionId, timestamp });
+
+    // Generate device fingerprint using only deviceId for consistency
     const deviceFingerprint = crypto
       .createHash('sha256')
-      .update(`${ipAddress}:${userAgent}:${deviceId}`)
+      .update(deviceId)
       .digest('hex');
 
     logger.info('Received order request', {
@@ -360,8 +363,8 @@ module.exports = (io) => {
 
         // Record the order attempt in device_order_limits
         await connection.query(
-          'INSERT INTO device_order_limits (device_fingerprint, order_timestamp) VALUES (?, ?)',
-          [deviceFingerprint, new Date()]
+          'INSERT INTO device_order_limits (device_fingerprint, order_timestamp, device_id) VALUES (?, ?, ?)',
+          [deviceFingerprint, new Date(), deviceId]
         );
 
         if (items && Array.isArray(items)) {
@@ -436,8 +439,6 @@ module.exports = (io) => {
 
         const [rows] = await connection.query('SELECT * FROM notifications WHERE id = ?', [notificationId]);
         const notification = rows[0];
-
-
 
         await connection.commit();
 
