@@ -18,7 +18,16 @@ module.exports = (io) => {
   router.post('/orders', async (req, res) => {
     const { items, breakfastItems, total_price, order_type, delivery_address, promotion_id, table_id, request_id, notes } = req.body;
     const sessionId = req.headers['x-session-id'] || req.sessionID;
+    const deviceId = req.headers['x-device-id'] || 'unknown';
+    const userAgent = req.headers['user-agent'] || 'unknown';
+    const ipAddress = req.headers['x-forwarded-for'] || req.ip || 'unknown';
     const timestamp = new Date().toISOString();
+
+    // Generate device fingerprint
+    const deviceFingerprint = crypto
+      .createHash('sha256')
+      .update(`${ipAddress}:${userAgent}:${deviceId}`)
+      .digest('hex');
 
     logger.info('Received order request', {
       items: items?.length || 0,
@@ -27,11 +36,24 @@ module.exports = (io) => {
       table_id,
       supplements: items?.map(i => ({ item_id: i.item_id, supplement_id: i.supplement_id })) || [],
       sessionId,
+      deviceFingerprint,
       timestamp,
       notes,
     });
 
     try {
+      // Rate limiting: Check orders in the last hour for this device
+      const [orderCountRows] = await db.query(
+        'SELECT COUNT(*) as order_count FROM device_order_limits WHERE device_fingerprint = ? AND order_timestamp >= NOW() - INTERVAL 1 HOUR',
+        [deviceFingerprint]
+      );
+      const orderCount = orderCountRows[0].order_count;
+
+      if (orderCount >= 3) {
+        logger.warn('Rate limit exceeded for device', { deviceFingerprint, orderCount, sessionId, timestamp });
+        return res.status(429).json({ error: 'Order limit exceeded. Only 3 orders per hour are allowed per device.' });
+      }
+
       if (!sessionId || typeof sessionId !== 'string' || !sessionId.trim()) {
         logger.warn('Invalid or missing sessionId', { sessionId, timestamp });
         return res.status(400).json({ error: 'Valid session ID is required' });
@@ -315,6 +337,12 @@ module.exports = (io) => {
         );
         const orderId = orderResult.insertId;
 
+        // Record the order attempt in device_order_limits
+        await connection.query(
+          'INSERT INTO device_order_limits (device_fingerprint, order_timestamp) VALUES (?, ?)',
+          [deviceFingerprint, new Date()]
+        );
+
         if (items && Array.isArray(items)) {
           for (const item of items) {
             await connection.query(
@@ -414,19 +442,20 @@ module.exports = (io) => {
           total_price: calculatedTotal,
           notificationId,
           sessionId,
+          deviceFingerprint,
           timestamp,
           notes,
         });
         res.status(201).json({ message: 'Order created', orderId });
       } catch (err) {
         await connection.rollback();
-        logger.error('Error creating order in transaction', { error: err.message, table_id, sessionId, timestamp });
+        logger.error('Error creating order in transaction', { error: err.message, table_id, sessionId, deviceFingerprint, timestamp });
         res.status(500).json({ error: 'Failed to create order' });
       } finally {
         connection.release();
       }
     } catch (err) {
-      logger.error('Error creating order', { error: err.message, table_id, sessionId, timestamp });
+      logger.error('Error creating order', { error: err.message, table_id, sessionId, deviceFingerprint, timestamp });
       res.status(500).json({ error: 'Failed to create order' });
     }
   });
@@ -772,7 +801,8 @@ module.exports = (io) => {
 
   router.get('/session', (req, res) => {
     const sessionId = req.headers['x-session-id'] || req.sessionID;
-    res.json({ sessionId });
+    const deviceId = req.headers['x-device-id'] || uuidv4();
+    res.json({ sessionId, deviceId });
   });
 
   return router;
