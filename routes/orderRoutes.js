@@ -23,6 +23,13 @@ module.exports = (io) => {
     const ipAddress = req.headers['x-forwarded-for'] || req.ip || 'unknown';
     const timestamp = new Date().toISOString();
 
+    // Validate deviceId
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!deviceId || deviceId === 'unknown' || !uuidRegex.test(deviceId)) {
+      logger.warn('Invalid or missing deviceId', { deviceId, sessionId, timestamp });
+      return res.status(400).json({ error: 'Valid device ID is required' });
+    }
+
     // Generate device fingerprint
     const deviceFingerprint = crypto
       .createHash('sha256')
@@ -36,21 +43,35 @@ module.exports = (io) => {
       table_id,
       supplements: items?.map(i => ({ item_id: i.item_id, supplement_id: i.supplement_id })) || [],
       sessionId,
+      deviceId,
       deviceFingerprint,
       timestamp,
       notes,
     });
 
     try {
+      // Clean up old entries from device_order_limits (older than 1 hour)
+      await db.query(
+        'DELETE FROM device_order_limits WHERE order_timestamp < NOW() - INTERVAL 1 HOUR'
+      );
+
       // Rate limiting: Check orders in the last hour for this device
       const [orderCountRows] = await db.query(
         'SELECT COUNT(*) as order_count FROM device_order_limits WHERE device_fingerprint = ? AND order_timestamp >= NOW() - INTERVAL 1 HOUR',
         [deviceFingerprint]
       );
-      const orderCount = orderCountRows[0].order_count;
+      const orderCount = parseInt(orderCountRows[0].order_count, 10);
+
+      logger.info('Rate limit check', {
+        deviceId,
+        deviceFingerprint,
+        orderCount,
+        sessionId,
+        timestamp
+      });
 
       if (orderCount >= 3) {
-        logger.warn('Rate limit exceeded for device', { deviceFingerprint, orderCount, sessionId, timestamp });
+        logger.warn('Rate limit exceeded for device', { deviceId, deviceFingerprint, orderCount, sessionId, timestamp });
         return res.status(429).json({ error: 'Order limit exceeded. Only 3 orders per hour are allowed per device.' });
       }
 
@@ -339,8 +360,8 @@ module.exports = (io) => {
 
         // Record the order attempt in device_order_limits
         await connection.query(
-          'INSERT INTO device_order_limits (device_fingerprint, order_timestamp) VALUES (?, ?)',
-          [deviceFingerprint, new Date()]
+          'INSERT INTO device_order_limits (device_fingerprint, order_timestamp, device_id) VALUES (?, ?, ?)',
+          [deviceFingerprint, new Date(), deviceId]
         );
 
         if (items && Array.isArray(items)) {
@@ -442,6 +463,7 @@ module.exports = (io) => {
           total_price: calculatedTotal,
           notificationId,
           sessionId,
+          deviceId,
           deviceFingerprint,
           timestamp,
           notes,
@@ -449,13 +471,13 @@ module.exports = (io) => {
         res.status(201).json({ message: 'Order created', orderId });
       } catch (err) {
         await connection.rollback();
-        logger.error('Error creating order in transaction', { error: err.message, table_id, sessionId, deviceFingerprint, timestamp });
+        logger.error('Error creating order in transaction', { error: err.message, table_id, sessionId, deviceId, deviceFingerprint, timestamp });
         res.status(500).json({ error: 'Failed to create order' });
       } finally {
         connection.release();
       }
     } catch (err) {
-      logger.error('Error creating order', { error: err.message, table_id, sessionId, deviceFingerprint, timestamp });
+      logger.error('Error creating order', { error: err.message, table_id, sessionId, deviceId, deviceFingerprint, timestamp });
       res.status(500).json({ error: 'Failed to create order' });
     }
   });
@@ -561,7 +583,7 @@ module.exports = (io) => {
                GROUP_CONCAT(DISTINCT b.name) AS breakfast_names,
                GROUP_CONCAT(DISTINCT b.image_url) AS breakfast_images,
                GROUP_CONCAT(boo.breakfast_option_id) AS breakfast_option_ids,
-               GROUP_CONCAT(bo.option_name) AS breakfast_option_names,
+               GROUP_CONCAT(bo.option_name) AS breakfast_option(names,
                GROUP_CONCAT(bo.additional_price) AS breakfast_option_prices
         FROM orders o
         LEFT JOIN order_items oi ON o.id = oi.order_id
@@ -610,7 +632,7 @@ module.exports = (io) => {
       }
 
       if (approved !== 1 && approved !== 0) {
-        logger.warn('Invalid approved value', { orderId, approved, sessionId, timestamp });
+        logger.warn('Invalid approved value', { orderId, approved, sessionId, explorer });
         return res.status(400).json({ error: 'Invalid approved value' });
       }
 
