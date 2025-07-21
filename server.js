@@ -65,6 +65,7 @@ const allowedOrigins = [
   ...(process.env.NODE_ENV === 'development' ? [
     'http://localhost:5173',
     'http://192.168.1.6:5173',
+    'http://192.168.1.8:5173', // Added from localhost file
     /^http:\/\/192\.168\.1\.\d{1,3}:5173$/
   ] : []),
 ];
@@ -84,7 +85,7 @@ const corsOptions = {
     }
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Session-Id'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Session-Id', 'X-Device-Id'], // Added X-Device-Id
   credentials: true,
 };
 
@@ -107,7 +108,7 @@ const io = new Server(server, {
       }
     },
     methods: ['GET', 'POST'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Session-Id'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Session-Id', 'X-Device-Id'], // Added X-Device-Id
     credentials: true,
   },
   path: '/socket.io/',
@@ -118,7 +119,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Serve Cloudinary images
-app.get('/uploads/:publicId', async (req, res) => {
+app.get('/Uploads/:publicId', async (req, res) => {
   try {
     const { publicId } = req.params;
     const imageUrl = cloudinary.url(`Uploads/${publicId}`, {
@@ -185,28 +186,20 @@ app.use('/api', bannerRoutes);
 app.use('/api', breakfastRoutes);
 app.use('/api', themeRoutes);
 
-// Apply validations middleware only for protected endpoints
+// Apply validations middleware
 app.use('/api', (req, res, next) => {
-  if (req.method === 'GET' && (
-    req.path.includes('/menu-items') ||
-    req.path.includes('/categories') ||
-    req.path.includes('/banners') ||
-    req.path.includes('/breakfasts') ||
-    req.path.includes('/promotions') ||
-    req.path.includes('/theme')
-  )) {
-    logger.debug('Skipping validation for public GET endpoint', { path: req.path });
-    return next();
-  }
-
   if (
     req.method === 'POST' ||
     req.method === 'PUT' ||
     req.method === 'DELETE' ||
     (req.method === 'GET' && (
+      req.path.includes('/menu-items') ||
+      req.path.includes('/categories') ||
       req.path.includes('/ratings') ||
       req.path.includes('/tables') ||
-      req.path.includes('/notifications')
+      req.path.includes('/notifications') ||
+      req.path.includes('/banners') ||
+      req.path.includes('/breakfasts')
     ))
   ) {
     if (req.path.includes('/menu-items') || req.path.includes('/categories') || req.path.includes('/banners') || req.path.includes('/breakfasts')) {
