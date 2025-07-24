@@ -77,6 +77,31 @@ const logFormData = (req, res, next) => {
   next();
 };
 
+// Fetch all breakfast options
+router.get('/breakfast-options', checkAdmin, async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT bo.id, bo.breakfast_id, b.name AS breakfast_name, bo.group_id, bog.title AS group_title, 
+              bo.option_type, bo.option_name, bo.additional_price
+       FROM breakfast_options bo
+       JOIN breakfasts b ON bo.breakfast_id = b.id
+       JOIN breakfast_option_groups bog ON bo.group_id = bog.id
+       WHERE bo.breakfast_id IS NOT NULL
+       UNION
+       SELECT bo.id, NULL AS breakfast_id, NULL AS breakfast_name, bo.group_id, bog.title AS group_title, 
+              bo.option_type, bo.option_name, bo.additional_price
+       FROM breakfast_options bo
+       JOIN breakfast_option_groups bog ON bo.group_id = bog.id
+       WHERE bo.breakfast_id IS NULL`
+    );
+    logger.info('Breakfast options fetched', { count: rows.length });
+    res.json(rows);
+  } catch (error) {
+    logger.error('Error fetching breakfast options', { error: error.message });
+    res.status(500).json({ error: 'Failed to fetch breakfast options', details: error.message });
+  }
+});
+
 // Create breakfast
 router.post('/breakfasts', checkAdmin, breakfastValidation, upload, logFormData, async (req, res) => {
   const { name, description, price, availability, category_id, option_groups, reusable_option_groups } = req.body;
