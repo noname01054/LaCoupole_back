@@ -65,7 +65,7 @@ const allowedOrigins = [
   ...(process.env.NODE_ENV === 'development' ? [
     'http://localhost:5173',
     'http://192.168.1.6:5173',
-    'http://192.168.1.8:5173', // Added from localhost file
+    'http://192.168.1.8:5173',
     /^http:\/\/192\.168\.1\.\d{1,3}:5173$/
   ] : []),
 ];
@@ -85,7 +85,7 @@ const corsOptions = {
     }
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Session-Id', 'X-Device-Id'], // Added X-Device-Id
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Session-Id', 'X-Device-Id'],
   credentials: true,
 };
 
@@ -108,7 +108,7 @@ const io = new Server(server, {
       }
     },
     methods: ['GET', 'POST'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Session-Id', 'X-Device-Id'], // Added X-Device-Id
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Session-Id', 'X-Device-Id'],
     credentials: true,
   },
   path: '/socket.io/',
@@ -174,6 +174,7 @@ const notificationRoutes = require('./routes/notificationRoutes');
 const bannerRoutes = require('./routes/bannerRoutes');
 const breakfastRoutes = require('./routes/breakfastRoutes');
 const themeRoutes = require('./routes/themeRoutes');
+const stockRoutes = require('./routes/stockRoutes');
 
 app.use('/api', authRoutes);
 app.use('/api', menuRoutes);
@@ -185,6 +186,7 @@ app.use('/api', notificationRoutes);
 app.use('/api', bannerRoutes);
 app.use('/api', breakfastRoutes);
 app.use('/api', themeRoutes);
+app.use('/api', stockRoutes);
 
 // Apply validations middleware
 app.use('/api', (req, res, next) => {
@@ -199,10 +201,16 @@ app.use('/api', (req, res, next) => {
       req.path.includes('/tables') ||
       req.path.includes('/notifications') ||
       req.path.includes('/banners') ||
-      req.path.includes('/breakfasts')
+      req.path.includes('/breakfasts') ||
+      req.path.includes('/ingredients') ||
+      req.path.includes('/stock-dashboard')
     ))
   ) {
-    if (req.path.includes('/menu-items') || req.path.includes('/categories') || req.path.includes('/banners') || req.path.includes('/breakfasts')) {
+    if (req.path.includes('/menu-items') || 
+        req.path.includes('/categories') || 
+        req.path.includes('/banners') || 
+        req.path.includes('/breakfasts') ||
+        req.path.includes('/ingredients')) {
       if (req.headers['content-type']?.includes('multipart/form-data')) {
         return next();
       }
