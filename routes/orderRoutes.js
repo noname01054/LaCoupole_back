@@ -862,7 +862,7 @@ module.exports = (io) => {
 
   router.post('/orders/:id/cancel', async (req, res) => {
     const { id } = req.params;
-    const { restoreStock } = req.body; // New parameter to decide whether to restore stock
+    const { restoreStock = false } = req.body; // Default to false if not provided
     const timestamp = new Date().toISOString();
     const sessionId = req.headers['x-session-id'] || req.sessionID;
 
@@ -891,8 +891,19 @@ module.exports = (io) => {
 
       try {
         let ingredientUsage = null;
-        // If the order was approved and restoreStock is true, restore the stock
-        if (orderRows[0].approved && restoreStock) {
+        // Only restore stock if order was approved and restoreStock is explicitly true
+        if (orderRows[0].approved && restoreStock === true) {
+          // Check for prior stock restoration
+          const [existing] = await connection.query(
+            'SELECT id FROM stock_transactions WHERE order_id = ? AND reason = ?',
+            [orderId, 'Order cancellation stock restoration']
+          );
+          if (existing.length > 0) {
+            await connection.rollback();
+            logger.warn('Stock already restored for order', { orderId, sessionId, timestamp });
+            return res.status(400).json({ error: 'Stock already restored for this order' });
+          }
+
           ingredientUsage = new Map();
           const [orderItems] = await connection.query(
             'SELECT item_id, breakfast_id, quantity, supplement_id FROM order_items WHERE order_id = ?',
@@ -955,7 +966,7 @@ module.exports = (io) => {
             }
           }
 
-          // Restore stock
+          // Restore stock by inserting transactions only (trigger handles quantity_in_stock update)
           for (const [ingredientId, quantity] of ingredientUsage) {
             await connection.query(
               'INSERT INTO stock_transactions (ingredient_id, quantity, transaction_type, order_id, reason) VALUES (?, ?, ?, ?, ?)',
