@@ -6,10 +6,10 @@ let pool;
 
 try {
   pool = mysql.createPool({
-    host: process.env.MYSQLHOST || 'switchback.proxy.rlwy.net',
-    port: parseInt(process.env.MYSQLPORT) || 42497,
+    host: process.env.MYSQLHOST || 'tramway.proxy.rlwy.net',
+    port: parseInt(process.env.MYSQLPORT) || 36902,
     user: process.env.MYSQLUSER || 'root',
-    password: process.env.MYSQLPASSWORD || 'QEdkfOjWSNSYsdwKCInwsMUhvRYgfjVo',
+    password: process.env.MYSQLPASSWORD || 'KXAEMxXNOGHwrFSlItgvJtePTWTXRNYl',
     database: process.env.MYSQLDATABASE || 'railway',
     waitForConnections: true,
     connectionLimit: 10,
