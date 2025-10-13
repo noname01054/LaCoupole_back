@@ -688,177 +688,226 @@ module.exports = (io) => {
     }
   });
 
-  router.post('/orders/:id/approve', async (req, res) => {
-    const { id } = req.params;
-    const timestamp = new Date().toISOString();
-    const sessionId = req.headers['x-session-id'] || req.sessionID;
+  // Replace the /orders/:id/approve endpoint in orderRoutes.js
+
+router.post('/orders/:id/approve', async (req, res) => {
+  const { id } = req.params;
+  const timestamp = new Date().toISOString();
+  const sessionId = req.headers['x-session-id'] || req.sessionID;
+
+  try {
+    if (!req.user || !await checkAdminOrServer(req.user.id)) {
+      logger.warn('Unauthorized attempt to approve order', { authenticatedUser: req.user, sessionId, timestamp });
+      return res.status(403).json({ error: 'Admin or server access required' });
+    }
+    
+    const orderId = parseInt(id);
+    if (isNaN(orderId) || orderId <= 0) {
+      logger.warn('Invalid order ID for approval', { id, sessionId, timestamp });
+      return res.status(400).json({ error: 'Valid order ID required' });
+    }
+    
+    const [orderRows] = await db.query('SELECT session_id, approved, status FROM orders WHERE id = ?', [orderId]);
+    if (orderRows.length === 0) {
+      logger.warn('Order not found for approval', { orderId, sessionId, timestamp });
+      return res.status(404).json({ error: 'Order not found' });
+    }
+    
+    if (orderRows[0].approved && orderRows[0].status !== 'cancelled') {
+      logger.warn('Order already approved and not cancelled', { orderId, sessionId, timestamp });
+      return res.status(400).json({ error: 'Order already approved and not cancelled' });
+    }
+
+    const connection = await db.getConnection();
+    await connection.beginTransaction();
 
     try {
-      if (!req.user || !await checkAdminOrServer(req.user.id)) {
-        logger.warn('Unauthorized attempt to approve order', { authenticatedUser: req.user, sessionId, timestamp });
-        return res.status(403).json({ error: 'Admin or server access required' });
-      }
-      const orderId = parseInt(id);
-      if (isNaN(orderId) || orderId <= 0) {
-        logger.warn('Invalid order ID for approval', { id, sessionId, timestamp });
-        return res.status(400).json({ error: 'Valid order ID required' });
-      }
-      const [orderRows] = await db.query('SELECT session_id, approved, status FROM orders WHERE id = ?', [orderId]);
-      if (orderRows.length === 0) {
-        logger.warn('Order not found for approval', { orderId, sessionId, timestamp });
-        return res.status(404).json({ error: 'Order not found' });
-      }
-      if (orderRows[0].approved && orderRows[0].status !== 'cancelled') {
-        logger.warn('Order already approved and not cancelled', { orderId, sessionId, timestamp });
-        return res.status(400).json({ error: 'Order already approved and not cancelled' });
-      }
+      // Fetch order items and breakfast options
+      const [orderItems] = await connection.query(
+        'SELECT item_id, breakfast_id, quantity, supplement_id FROM order_items WHERE order_id = ?',
+        [orderId]
+      );
+      
+      const [breakfastOptions] = await connection.query(
+        'SELECT boo.breakfast_option_id FROM breakfast_order_options boo JOIN order_items oi ON boo.order_item_id = oi.id WHERE oi.order_id = ?',
+        [orderId]
+      );
 
-      const connection = await db.getConnection();
-      await connection.beginTransaction();
+      // Calculate required ingredients
+      const ingredientUsage = new Map();
+      
+      for (const item of orderItems) {
+        const { item_id, breakfast_id, quantity, supplement_id } = item;
 
-      try {
-        // Fetch order items and breakfast options
-        const [orderItems] = await connection.query(
-          'SELECT item_id, breakfast_id, quantity, supplement_id FROM order_items WHERE order_id = ?',
-          [orderId]
-        );
-        const [breakfastOptions] = await connection.query(
-          'SELECT boo.breakfast_option_id FROM breakfast_order_options boo JOIN order_items oi ON boo.order_item_id = oi.id WHERE oi.order_id = ?',
-          [orderId]
-        );
-
-        // Calculate required ingredients
-        const ingredientUsage = new Map();
-        for (const item of orderItems) {
-          const { item_id, breakfast_id, quantity, supplement_id } = item;
-
-          // Menu items
-          if (item_id) {
-            const [menuItemIngredients] = await connection.query(
-              'SELECT ingredient_id, quantity AS ingredient_quantity FROM menu_item_ingredients WHERE menu_item_id = ?',
-              [item_id]
-            );
-            for (const ing of menuItemIngredients) {
-              const totalQuantity = parseFloat(ing.ingredient_quantity) * quantity;
-              ingredientUsage.set(ing.ingredient_id, (ingredientUsage.get(ing.ingredient_id) || 0) + totalQuantity);
-            }
-          }
-
-          // Supplements
-          if (supplement_id) {
-            const [supplementIngredients] = await connection.query(
-              'SELECT ingredient_id, quantity AS ingredient_quantity FROM supplement_ingredients WHERE supplement_id = ?',
-              [supplement_id]
-            );
-            for (const ing of supplementIngredients) {
-              const totalQuantity = parseFloat(ing.ingredient_quantity) * quantity;
-              ingredientUsage.set(ing.ingredient_id, (ingredientUsage.get(ing.ingredient_id) || 0) + totalQuantity);
-            }
-          }
-
-          // Breakfasts
-          if (breakfast_id) {
-            const [breakfastIngredients] = await connection.query(
-              'SELECT ingredient_id, quantity AS ingredient_quantity FROM breakfast_ingredients WHERE breakfast_id = ?',
-              [breakfast_id]
-            );
-            for (const ing of breakfastIngredients) {
-              const totalQuantity = parseFloat(ing.ingredient_quantity) * quantity;
-              ingredientUsage.set(ing.ingredient_id, (ingredientUsage.get(ing.ingredient_id) || 0) + totalQuantity);
-            }
-          }
-        }
-
-        // Breakfast options
-        for (const option of breakfastOptions) {
-          const [optionIngredients] = await connection.query(
-            'SELECT ingredient_id, quantity AS ingredient_quantity FROM breakfast_option_ingredients WHERE breakfast_option_id = ?',
-            [option.breakfast_option_id]
+        // Process menu items
+        if (item_id) {
+          const [menuItemIngredients] = await connection.query(
+            'SELECT ingredient_id, quantity AS ingredient_quantity FROM menu_item_ingredients WHERE menu_item_id = ?',
+            [item_id]
           );
-          for (const ing of optionIngredients) {
-            const totalQuantity = parseFloat(ing.ingredient_quantity);
+          for (const ing of menuItemIngredients) {
+            const totalQuantity = parseFloat(ing.ingredient_quantity) * quantity;
             ingredientUsage.set(ing.ingredient_id, (ingredientUsage.get(ing.ingredient_id) || 0) + totalQuantity);
           }
         }
 
-        // Check stock availability
-        for (const [ingredientId, requiredQuantity] of ingredientUsage) {
-          const [stock] = await connection.query(
-            'SELECT name, quantity_in_stock FROM ingredients WHERE id = ?',
-            [ingredientId]
+        // Process supplements
+        if (supplement_id) {
+          const [supplementIngredients] = await connection.query(
+            'SELECT ingredient_id, quantity AS ingredient_quantity FROM supplement_ingredients WHERE supplement_id = ?',
+            [supplement_id]
           );
-          if (stock.length === 0) {
-            await connection.rollback();
-            logger.warn('Ingredient not found', { ingredientId, orderId, sessionId, timestamp });
-            return res.status(400).json({ error: `Ingredient ID ${ingredientId} not found` });
-          }
-          if (stock[0].quantity_in_stock < requiredQuantity) {
-            await connection.rollback();
-            logger.warn('Insufficient stock', { ingredientId, ingredientName: stock[0].name, required: requiredQuantity, available: stock[0].quantity_in_stock, orderId, sessionId, timestamp });
-            return res.status(400).json({ error: `Insufficient stock for ${stock[0].name}. Required: ${requiredQuantity}, Available: ${stock[0].quantity_in_stock}` });
+          for (const ing of supplementIngredients) {
+            const totalQuantity = parseFloat(ing.ingredient_quantity) * quantity;
+            ingredientUsage.set(ing.ingredient_id, (ingredientUsage.get(ing.ingredient_id) || 0) + totalQuantity);
           }
         }
 
-        // Deduct stock and log transactions
-        for (const [ingredientId, quantity] of ingredientUsage) {
-          await connection.query(
-            'INSERT INTO stock_transactions (ingredient_id, quantity, transaction_type, order_id, reason) VALUES (?, ?, ?, ?, ?)',
-            [ingredientId, -quantity, 'deduction', orderId, 'Order approval']
+        // Process breakfasts
+        if (breakfast_id) {
+          const [breakfastIngredients] = await connection.query(
+            'SELECT ingredient_id, quantity AS ingredient_quantity FROM breakfast_ingredients WHERE breakfast_id = ?',
+            [breakfast_id]
           );
+          for (const ing of breakfastIngredients) {
+            const totalQuantity = parseFloat(ing.ingredient_quantity) * quantity;
+            ingredientUsage.set(ing.ingredient_id, (ingredientUsage.get(ing.ingredient_id) || 0) + totalQuantity);
+          }
         }
-
-        // Update order status
-        await connection.query('UPDATE orders SET approved = 1, status = ? WHERE id = ?', ['preparing', orderId]);
-
-        const [orderDetails] = await connection.query(`
-          SELECT o.*, t.table_number,
-                 GROUP_CONCAT(oi.item_id) AS item_ids,
-                 GROUP_CONCAT(CASE WHEN oi.item_id IS NOT NULL THEN oi.quantity END) AS menu_quantities,
-                 GROUP_CONCAT(mi.name) AS item_names, GROUP_CONCAT(mi.image_url) AS image_urls,
-                 GROUP_CONCAT(oi.unit_price) AS unit_prices, GROUP_CONCAT(oi.supplement_id) AS supplement_ids,
-                 GROUP_CONCAT(mis.name) AS supplement_names, GROUP_CONCAT(mis.additional_price) AS supplement_prices,
-                 GROUP_CONCAT(DISTINCT oi.breakfast_id) AS breakfast_ids,
-                 GROUP_CONCAT(CASE WHEN oi.breakfast_id IS NOT NULL THEN oi.quantity END) AS breakfast_quantities,
-                 GROUP_CONCAT(DISTINCT b.name) AS breakfast_names,
-                 GROUP_CONCAT(DISTINCT b.image_url) AS breakfast_images,
-                 GROUP_CONCAT(boo.breakfast_option_id) AS breakfast_option_ids,
-                 GROUP_CONCAT(bo.option_name) AS breakfast_option_names,
-                 GROUP_CONCAT(bo.additional_price) AS breakfast_option_prices
-          FROM orders o
-          LEFT JOIN order_items oi ON o.id = oi.order_id
-          LEFT JOIN menu_items mi ON oi.item_id = mi.id
-          LEFT JOIN menu_item_supplements mis ON oi.supplement_id = mis.supplement_id AND oi.item_id = mi.id
-          LEFT JOIN breakfasts b ON oi.breakfast_id = b.id
-          LEFT JOIN breakfast_order_options boo ON oi.id = boo.order_item_id
-          LEFT JOIN breakfast_options bo ON boo.breakfast_option_id = bo.id
-          LEFT JOIN tables t ON o.table_id = t.id
-          WHERE o.id = ?
-          GROUP BY o.id
-        `, [orderId]);
-
-        orderDetails[0].approved = Number(orderDetails[0].approved);
-        const derivedStatus = orderDetails[0].status || 'preparing';
-
-        await connection.commit();
-
-        const guestSessionId = orderRows[0].session_id;
-        io.to(`guest-${guestSessionId}`).emit('orderApproved', { orderId: orderId.toString(), status: derivedStatus, orderDetails: orderDetails[0] });
-        io.to('staff-notifications').emit('orderApproved', { orderId: orderId.toString(), status: derivedStatus, orderDetails: orderDetails[0] });
-
-        logger.info('Order approved successfully with stock deduction', { orderId, ingredientUsage: Object.fromEntries(ingredientUsage), guestSessionId, sessionId, timestamp });
-        res.status(200).json({ message: 'Order approved' });
-      } catch (err) {
-        await connection.rollback();
-        logger.error('Error approving order with stock deduction', { error: err.message, orderId, sessionId, timestamp });
-        res.status(500).json({ error: 'Failed to approve order' });
-      } finally {
-        connection.release();
       }
+
+      // Process breakfast options
+      for (const option of breakfastOptions) {
+        const [optionIngredients] = await connection.query(
+          'SELECT ingredient_id, quantity AS ingredient_quantity FROM breakfast_option_ingredients WHERE breakfast_option_id = ?',
+          [option.breakfast_option_id]
+        );
+        for (const ing of optionIngredients) {
+          const totalQuantity = parseFloat(ing.ingredient_quantity);
+          ingredientUsage.set(ing.ingredient_id, (ingredientUsage.get(ing.ingredient_id) || 0) + totalQuantity);
+        }
+      }
+
+      // Check stock availability and update
+      for (const [ingredientId, requiredQuantity] of ingredientUsage) {
+        const [stock] = await connection.query(
+          'SELECT name, quantity_in_stock FROM ingredients WHERE id = ?',
+          [ingredientId]
+        );
+        
+        if (stock.length === 0) {
+          await connection.rollback();
+          logger.warn('Ingredient not found', { ingredientId, orderId, sessionId, timestamp });
+          return res.status(400).json({ error: `Ingredient ID ${ingredientId} not found` });
+        }
+        
+        const availableStock = parseFloat(stock[0].quantity_in_stock);
+        if (availableStock < requiredQuantity) {
+          await connection.rollback();
+          logger.warn('Insufficient stock', { 
+            ingredientId, 
+            ingredientName: stock[0].name, 
+            required: requiredQuantity, 
+            available: availableStock, 
+            orderId, 
+            sessionId, 
+            timestamp 
+          });
+          return res.status(400).json({ 
+            error: `Insufficient stock for ${stock[0].name}. Required: ${requiredQuantity}, Available: ${availableStock}` 
+          });
+        }
+
+        // Update ingredient stock directly
+        const newQuantity = availableStock - requiredQuantity;
+        await connection.query(
+          'UPDATE ingredients SET quantity_in_stock = ?, updated_at = NOW() WHERE id = ?',
+          [newQuantity, ingredientId]
+        );
+
+        // Record transaction for audit trail
+        await connection.query(
+          'INSERT INTO stock_transactions (ingredient_id, quantity, transaction_type, order_id, reason) VALUES (?, ?, ?, ?, ?)',
+          [ingredientId, -requiredQuantity, 'deduction', orderId, 'Order approval']
+        );
+      }
+
+      // Update order status
+      await connection.query(
+        'UPDATE orders SET approved = 1, status = ? WHERE id = ?', 
+        ['preparing', orderId]
+      );
+
+      // Fetch updated order details
+      const [orderDetails] = await connection.query(`
+        SELECT o.*, t.table_number,
+               GROUP_CONCAT(oi.item_id) AS item_ids,
+               GROUP_CONCAT(CASE WHEN oi.item_id IS NOT NULL THEN oi.quantity END) AS menu_quantities,
+               GROUP_CONCAT(mi.name) AS item_names, GROUP_CONCAT(mi.image_url) AS image_urls,
+               GROUP_CONCAT(oi.unit_price) AS unit_prices, GROUP_CONCAT(oi.supplement_id) AS supplement_ids,
+               GROUP_CONCAT(mis.name) AS supplement_names, GROUP_CONCAT(mis.additional_price) AS supplement_prices,
+               GROUP_CONCAT(DISTINCT oi.breakfast_id) AS breakfast_ids,
+               GROUP_CONCAT(CASE WHEN oi.breakfast_id IS NOT NULL THEN oi.quantity END) AS breakfast_quantities,
+               GROUP_CONCAT(DISTINCT b.name) AS breakfast_names,
+               GROUP_CONCAT(DISTINCT b.image_url) AS breakfast_images,
+               GROUP_CONCAT(boo.breakfast_option_id) AS breakfast_option_ids,
+               GROUP_CONCAT(bo.option_name) AS breakfast_option_names,
+               GROUP_CONCAT(bo.additional_price) AS breakfast_option_prices
+        FROM orders o
+        LEFT JOIN order_items oi ON o.id = oi.order_id
+        LEFT JOIN menu_items mi ON oi.item_id = mi.id
+        LEFT JOIN menu_item_supplements mis ON oi.supplement_id = mis.supplement_id AND oi.item_id = mi.id
+        LEFT JOIN breakfasts b ON oi.breakfast_id = b.id
+        LEFT JOIN breakfast_order_options boo ON oi.id = boo.order_item_id
+        LEFT JOIN breakfast_options bo ON boo.breakfast_option_id = bo.id
+        LEFT JOIN tables t ON o.table_id = t.id
+        WHERE o.id = ?
+        GROUP BY o.id
+      `, [orderId]);
+
+      orderDetails[0].approved = Number(orderDetails[0].approved);
+      const derivedStatus = orderDetails[0].status || 'preparing';
+
+      await connection.commit();
+
+      const guestSessionId = orderRows[0].session_id;
+      io.to(`guest-${guestSessionId}`).emit('orderApproved', { 
+        orderId: orderId.toString(), 
+        status: derivedStatus, 
+        orderDetails: orderDetails[0] 
+      });
+      io.to('staff-notifications').emit('orderApproved', { 
+        orderId: orderId.toString(), 
+        status: derivedStatus, 
+        orderDetails: orderDetails[0] 
+      });
+
+      logger.info('Order approved successfully with stock deduction', { 
+        orderId, 
+        ingredientUsage: Object.fromEntries(ingredientUsage), 
+        guestSessionId, 
+        sessionId, 
+        timestamp 
+      });
+      
+      res.status(200).json({ message: 'Order approved' });
     } catch (err) {
-      logger.error('Error approving order', { error: err.message, orderId: id, sessionId, timestamp });
+      await connection.rollback();
+      logger.error('Error approving order with stock deduction', { 
+        error: err.message, 
+        orderId, 
+        sessionId, 
+        timestamp 
+      });
       res.status(500).json({ error: 'Failed to approve order' });
+    } finally {
+      connection.release();
     }
-  });
+  } catch (err) {
+    logger.error('Error approving order', { error: err.message, orderId: id, sessionId, timestamp });
+    res.status(500).json({ error: 'Failed to approve order' });
+  }
+});
 
   router.post('/orders/:id/cancel', async (req, res) => {
     const { id } = req.params;
