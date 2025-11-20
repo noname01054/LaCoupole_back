@@ -30,9 +30,6 @@ module.exports = (io) => {
       return res.status(400).json({ error: 'Valid device ID is required' });
     }
 
-    // Log fingerprint inputs for debugging
-    logger.debug('Device fingerprint inputs', { ipAddress, userAgent, deviceId, sessionId, timestamp });
-
     // Generate device fingerprint using only deviceId for consistency
     const deviceFingerprint = crypto
       .createHash('sha256')
@@ -578,7 +575,7 @@ module.exports = (io) => {
         SELECT o.*, t.table_number,
                GROUP_CONCAT(oi.item_id) AS item_ids,
                GROUP_CONCAT(CASE WHEN oi.item_id IS NOT NULL THEN oi.quantity END) AS menu_quantities,
-               GROUP_CONCAT(mi.name) AS item_names, GROUP_CONCAT(mi.image_url) AS image_urls,
+               GROUP_CONCAT(mi.name) AS item_names, GROUP_CONCAT(mi.image_url url) AS image_urls,
                GROUP_CONCAT(oi.unit_price) AS unit_prices, GROUP_CONCAT(oi.supplement_id) AS supplement_ids,
                GROUP_CONCAT(mis.name) AS supplement_names, GROUP_CONCAT(mis.additional_price) AS supplement_prices,
                GROUP_CONCAT(DISTINCT oi.breakfast_id) AS breakfast_ids,
@@ -625,7 +622,7 @@ module.exports = (io) => {
     try {
       if (!req.user || !await checkAdminOrServer(req.user.id)) {
         logger.warn('Unauthorized attempt to update order', { authenticatedUser: req.user, sessionId, timestamp });
-        return res.status(403).json({ error: 'Admin or server access required' });
+        return res.status( cetera403).json({ error: 'Admin or server access required' });
       }
 
       const orderId = parseInt(id);
@@ -688,8 +685,7 @@ module.exports = (io) => {
     }
   });
 
-  // Replace the /orders/:id/approve endpoint in orderRoutes.js
-
+  // ==================== FIXED APPROVE ENDPOINT ====================
   router.post('/orders/:id/approve', async (req, res) => {
     const { id } = req.params;
     const timestamp = new Date().toISOString();
@@ -713,7 +709,6 @@ module.exports = (io) => {
         return res.status(404).json({ error: 'Order not found' });
       }
 
-      // If already approved and not cancelled, don't approve again
       if (orderRows[0].approved && orderRows[0].status !== 'cancelled') {
         logger.warn('Order already approved and not cancelled', { orderId, sessionId, timestamp });
         return res.status(400).json({ error: 'Order already approved and not cancelled' });
@@ -723,7 +718,6 @@ module.exports = (io) => {
       await connection.beginTransaction();
 
       try {
-        // Fetch order items and breakfast options
         const [orderItems] = await connection.query(
           'SELECT item_id, breakfast_id, quantity, supplement_id FROM order_items WHERE order_id = ?',
           [orderId]
@@ -734,62 +728,63 @@ module.exports = (io) => {
           [orderId]
         );
 
-        // Calculate required ingredients
+        // FIXED: CORRECT INGREDIENT CALCULATION
         const ingredientUsage = new Map();
 
         for (const item of orderItems) {
           const { item_id, breakfast_id, quantity, supplement_id } = item;
 
-          // Process menu items
           if (item_id) {
-            const [menuItemIngredients] = await connection.query(
+            const [ings] = await connection.query(
               'SELECT ingredient_id, quantity AS ingredient_quantity FROM menu_item_ingredients WHERE menu_item_id = ?',
               [item_id]
             );
-            for (const ing of menuItemIngredients) {
-              const totalQuantity = parseFloat(ing.ingredient_quantity) * quantity;
-              ingredientUsage.set(ing.ingredient_id, (ingredientUsage.get(ing.ingredient_id) || 0) + totalQuantity);
+            for (const ing of ings) {
+              const total = parseFloat(ing.ingredient_quantity) * quantity;
+              ingredientUsage.set(ing.ingredient_id, (ingredientUsage.get(ing.ingredient_id) || 0) + total);
             }
           }
 
-          // Process supplements
           if (supplement_id) {
-            const [supplementIngredients] = await connection.query(
+            const [ings] = await connection.query(
               'SELECT ingredient_id, quantity AS ingredient_quantity FROM supplement_ingredients WHERE supplement_id = ?',
               [supplement_id]
             );
-            for (const ing of supplementIngredients) {
-              const totalQuantity = parseFloat(ing.ingredient_quantity) * quantity;
-              ingredientUsage.set(ing.ingredient_id, (ingredientUsage.get(ing.ingredient_id) || 0) + totalQuantity);
+            for (const ing of ings) {
+              const total = parseFloat(ing.ingredient_quantity) * quantity;
+              ingredientUsage.set(ing.ingredient_id, (ingredientUsage.get(ing.ingredient_id) || 0) + total);
             }
           }
 
-          // Process breakfasts
           if (breakfast_id) {
-            const [breakfastIngredients] = await connection.query(
+            const [ings] = await connection.query(
               'SELECT ingredient_id, quantity AS ingredient_quantity FROM breakfast_ingredients WHERE breakfast_id = ?',
               [breakfast_id]
             );
-            for (const ing of breakfastIngredients) {
-              const totalQuantity = parseFloat(ing.ingredient_quantity) * quantity;
-              ingredientUsage.set(ing.ingredient_id, (ingredientUsage.get(ing.ingredient_id) || 0) + totalQuantity);
+            for (const ing of ings) {
+              const total = parseFloat(ing.ingredient_quantity) * quantity;
+              ingredientUsage.set(ing.ingredient_id, (ingredientUsage.get(ing.ingredient_id) || 0) + total);
             }
           }
         }
 
-        // Process breakfast options
+        // FIXED: Breakfast options now multiplied by breakfast quantity
         for (const option of breakfastOptions) {
-          const [optionIngredients] = await connection.query(
+          const [ings] = await connection.query(
             'SELECT ingredient_id, quantity AS ingredient_quantity FROM breakfast_option_ingredients WHERE breakfast_option_id = ?',
             [option.breakfast_option_id]
           );
-          for (const ing of optionIngredients) {
-            const totalQuantity = parseFloat(ing.ingredient_quantity);
-            ingredientUsage.set(ing.ingredient_id, (ingredientUsage.get(ing.ingredient_id) || 0) + totalQuantity);
+
+          const parentItem = orderItems.find(i => i.breakfast_id);
+          const qty = parentItem ? parentItem.quantity : 1;
+
+          for (const ing of ings) {
+            const total = parseFloat(ing.ingredient_quantity) * qty;
+            ingredientUsage.set(ing.ingredient_id, (ingredientUsage.get(ing.ingredient_id) || 0) + total);
           }
         }
 
-        // Check stock availability and update
+        // Deduct stock
         for (const [ingredientId, requiredQuantity] of ingredientUsage) {
           const [stock] = await connection.query(
             'SELECT name, quantity_in_stock FROM ingredients WHERE id = ? FOR UPDATE',
@@ -819,27 +814,23 @@ module.exports = (io) => {
             });
           }
 
-          // Update ingredient stock directly
           const newQuantity = availableStock - requiredQuantity;
           await connection.query(
             'UPDATE ingredients SET quantity_in_stock = ?, updated_at = NOW() WHERE id = ?',
             [newQuantity, ingredientId]
           );
 
-          // Record transaction for audit trail (deduction)
           await connection.query(
             'INSERT INTO stock_transactions (ingredient_id, quantity, transaction_type, order_id, reason) VALUES (?, ?, ?, ?, ?)',
             [ingredientId, -requiredQuantity, 'deduction', orderId, 'Order approval']
           );
         }
 
-        // Update order status
         await connection.query(
           'UPDATE orders SET approved = 1, status = ? WHERE id = ?',
           ['preparing', orderId]
         );
 
-        // Fetch updated order details
         const [orderDetails] = await connection.query(`
           SELECT o.*, t.table_number,
                  GROUP_CONCAT(oi.item_id) AS item_ids,
@@ -910,9 +901,10 @@ module.exports = (io) => {
     }
   });
 
+  // ==================== FIXED CANCEL ENDPOINT (same fix applied) ====================
   router.post('/orders/:id/cancel', async (req, res) => {
     const { id } = req.params;
-    const { restoreStock = false } = req.body; // Default to false if not provided
+    const { restoreStock = false } = req.body;
     const timestamp = new Date().toISOString();
     const sessionId = req.headers['x-session-id'] || req.sessionID;
 
@@ -942,12 +934,8 @@ module.exports = (io) => {
       try {
         let ingredientUsage = null;
 
-        // Only attempt restoration if:
-        // - restoreStock explicitly requested (true)
-        // - AND order was previously approved (so deduction was likely made)
         if (restoreStock === true && orderRows[0].approved) {
 
-          // Prevent double restoration: check if restoration transactions already exist for this order
           const [existingRestorations] = await connection.query(
             'SELECT id FROM stock_transactions WHERE order_id = ? AND reason = ? LIMIT 1',
             [orderId, 'Order cancellation stock restoration']
@@ -958,18 +946,13 @@ module.exports = (io) => {
             return res.status(400).json({ error: 'Stock already restored for this order' });
           }
 
-          // Additionally, ensure there was a deduction previously for this order
           const [deductionsExist] = await connection.query(
             'SELECT id FROM stock_transactions WHERE order_id = ? AND transaction_type = ? LIMIT 1',
             [orderId, 'deduction']
           );
           if (deductionsExist.length === 0) {
-            // No record of a deduction; do not attempt to restore (prevents arbitrary increases)
             logger.warn('No prior deduction found for order; skipping stock restoration', { orderId, sessionId, timestamp });
-            // We'll still continue to mark order cancelled, but no restoration performed
           } else {
-            // Recompute ingredient usage just like approval did (to restore exact quantities)
-            ingredientUsage = new Map();
             const [orderItems] = await connection.query(
               'SELECT item_id, breakfast_id, quantity, supplement_id FROM order_items WHERE order_id = ?',
               [orderId]
@@ -979,79 +962,76 @@ module.exports = (io) => {
               [orderId]
             );
 
+            ingredientUsage = new Map();
+
+            // SAME FIXED LOGIC AS APPROVE
             for (const item of orderItems) {
               const { item_id, breakfast_id, quantity, supplement_id } = item;
 
-              // Menu items
               if (item_id) {
-                const [menuItemIngredients] = await connection.query(
+                const [ings] = await connection.query(
                   'SELECT ingredient_id, quantity AS ingredient_quantity FROM menu_item_ingredients WHERE menu_item_id = ?',
                   [item_id]
                 );
-                for (const ing of menuItemIngredients) {
-                  const totalQuantity = parseFloat(ing.ingredient_quantity) * quantity;
-                  ingredientUsage.set(ing.ingredient_id, (ingredientUsage.get(ing.ingredient_id) || 0) + totalQuantity);
+                for (const ing of ings) {
+                  const total = parseFloat(ing.ingredient_quantity) * quantity;
+                  ingredientUsage.set(ing.ingredient_id, (ingredientUsage.get(ing.ingredient_id) || 0) + total);
                 }
               }
 
-              // Supplements
               if (supplement_id) {
-                const [supplementIngredients] = await connection.query(
+                const [ings] = await connection.query(
                   'SELECT ingredient_id, quantity AS ingredient_quantity FROM supplement_ingredients WHERE supplement_id = ?',
                   [supplement_id]
                 );
-                for (const ing of supplementIngredients) {
-                  const totalQuantity = parseFloat(ing.ingredient_quantity) * quantity;
-                  ingredientUsage.set(ing.ingredient_id, (ingredientUsage.get(ing.ingredient_id) || 0) + totalQuantity);
+                for (const ing of ings) {
+                  const total = parseFloat(ing.ingredient_quantity) * quantity;
+                  ingredientUsage.set(ing.ingredient_id, (ingredientUsage.get(ing.ingredient_id) || 0) + total);
                 }
               }
 
-              // Breakfasts
               if (breakfast_id) {
-                const [breakfastIngredients] = await connection.query(
+                const [ings] = await connection.query(
                   'SELECT ingredient_id, quantity AS ingredient_quantity FROM breakfast_ingredients WHERE breakfast_id = ?',
                   [breakfast_id]
                 );
-                for (const ing of breakfastIngredients) {
-                  const totalQuantity = parseFloat(ing.ingredient_quantity) * quantity;
-                  ingredientUsage.set(ing.ingredient_id, (ingredientUsage.get(ing.ingredient_id) || 0) + totalQuantity);
+                for (const ing of ings) {
+                  const total = parseFloat(ing.ingredient_quantity) * quantity;
+                  ingredientUsage.set(ing.ingredient_id, (ingredientUsage.get(ing.ingredient_id) || 0) + total);
                 }
               }
             }
 
-            // Breakfast options
             for (const option of breakfastOptions) {
-              const [optionIngredients] = await connection.query(
+              const [ings] = await connection.query(
                 'SELECT ingredient_id, quantity AS ingredient_quantity FROM breakfast_option_ingredients WHERE breakfast_option_id = ?',
                 [option.breakfast_option_id]
               );
-              for (const ing of optionIngredients) {
-                const totalQuantity = parseFloat(ing.ingredient_quantity);
-                ingredientUsage.set(ing.ingredient_id, (ingredientUsage.get(ing.ingredient_id) || 0) + totalQuantity);
+              const parentItem = orderItems.find(i => i.breakfast_id);
+              const qty = parentItem ? parentItem.quantity : 1;
+              for (const ing of ings) {
+                const total = parseFloat(ing.ingredient_quantity) * qty;
+                ingredientUsage.set(ing.ingredient_id, (ingredientUsage.get(ing.ingredient_id) || 0) + total);
               }
             }
 
-            // Now perform the actual restoration: update ingredients table and insert transactions (addition)
             for (const [ingredientId, qtyToRestore] of ingredientUsage) {
-              // Lock the ingredient row for update to avoid race conditions
               const [stockRows] = await connection.query(
                 'SELECT id, quantity_in_stock FROM ingredients WHERE id = ? FOR UPDATE',
                 [ingredientId]
               );
               if (stockRows.length === 0) {
-                // If ingredient missing, rollback to avoid inconsistent state
                 await connection.rollback();
                 logger.warn('Ingredient not found during restoration', { ingredientId, orderId, sessionId, timestamp });
                 return res.status(400).json({ error: `Ingredient ID ${ingredientId} not found during restoration` });
               }
               const currentQty = parseFloat(stockRows[0].quantity_in_stock);
-              const newQty = currentQty + parseFloat(qtyToRestore);
+              const newQty = currentQty + qtyToRestore;
               await connection.query(
                 'UPDATE ingredients SET quantity_in_stock = ?, updated_at = NOW() WHERE id = ?',
                 [newQty, ingredientId]
               );
 
-              // Insert addition transaction
               await connection.query(
                 'INSERT INTO stock_transactions (ingredient_id, quantity, transaction_type, order_id, reason) VALUES (?, ?, ?, ?, ?)',
                 [ingredientId, qtyToRestore, 'addition', orderId, 'Order cancellation stock restoration']
@@ -1060,7 +1040,6 @@ module.exports = (io) => {
           }
         }
 
-        // Update order status and mark as not approved
         await connection.query('UPDATE orders SET status = ?, approved = 0 WHERE id = ?', ['cancelled', orderId]);
 
         const [orderDetails] = await connection.query(`
