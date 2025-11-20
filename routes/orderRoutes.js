@@ -688,8 +688,7 @@ module.exports = (io) => {
     }
   });
 
-  // Replace the /orders/:id/approve endpoint in orderRoutes.js
-
+  // FIXED: Order approval endpoint with idempotency and single stock deduction
   router.post('/orders/:id/approve', async (req, res) => {
     const { id } = req.params;
     const timestamp = new Date().toISOString();
@@ -707,22 +706,52 @@ module.exports = (io) => {
         return res.status(400).json({ error: 'Valid order ID required' });
       }
 
-      const [orderRows] = await db.query('SELECT session_id, approved, status FROM orders WHERE id = ?', [orderId]);
-      if (orderRows.length === 0) {
-        logger.warn('Order not found for approval', { orderId, sessionId, timestamp });
-        return res.status(404).json({ error: 'Order not found' });
-      }
-
-      // If already approved and not cancelled, don't approve again
-      if (orderRows[0].approved && orderRows[0].status !== 'cancelled') {
-        logger.warn('Order already approved and not cancelled', { orderId, sessionId, timestamp });
-        return res.status(400).json({ error: 'Order already approved and not cancelled' });
-      }
-
       const connection = await db.getConnection();
       await connection.beginTransaction();
 
       try {
+        // CRITICAL FIX: Lock the order row and check status in a single atomic operation
+        const [orderRows] = await connection.query(
+          'SELECT id, session_id, approved, status FROM orders WHERE id = ? FOR UPDATE',
+          [orderId]
+        );
+
+        if (orderRows.length === 0) {
+          await connection.rollback();
+          logger.warn('Order not found for approval', { orderId, sessionId, timestamp });
+          return res.status(404).json({ error: 'Order not found' });
+        }
+
+        const order = orderRows[0];
+
+        // CRITICAL FIX: Check if already approved (idempotency check)
+        if (order.approved && order.status !== 'cancelled') {
+          await connection.rollback();
+          logger.warn('Order already approved - preventing duplicate stock deduction', { 
+            orderId, 
+            currentStatus: order.status, 
+            sessionId, 
+            timestamp 
+          });
+          return res.status(400).json({ error: 'Order already approved' });
+        }
+
+        // CRITICAL FIX: Check if stock deduction already occurred for this order
+        const [existingDeductions] = await connection.query(
+          'SELECT id FROM stock_transactions WHERE order_id = ? AND transaction_type = ? LIMIT 1',
+          [orderId, 'deduction']
+        );
+
+        if (existingDeductions.length > 0) {
+          await connection.rollback();
+          logger.warn('Stock already deducted for this order - preventing duplicate deduction', { 
+            orderId, 
+            sessionId, 
+            timestamp 
+          });
+          return res.status(400).json({ error: 'Stock already deducted for this order' });
+        }
+
         // Fetch order items and breakfast options
         const [orderItems] = await connection.query(
           'SELECT item_id, breakfast_id, quantity, supplement_id FROM order_items WHERE order_id = ?',
@@ -789,7 +818,7 @@ module.exports = (io) => {
           }
         }
 
-        // Check stock availability and update
+        // Check stock availability and update (SINGLE ATOMIC OPERATION PER INGREDIENT)
         for (const [ingredientId, requiredQuantity] of ingredientUsage) {
           const [stock] = await connection.query(
             'SELECT name, quantity_in_stock FROM ingredients WHERE id = ? FOR UPDATE',
@@ -819,21 +848,31 @@ module.exports = (io) => {
             });
           }
 
-          // Update ingredient stock directly
+          // SINGLE UPDATE: Deduct stock in one operation
           const newQuantity = availableStock - requiredQuantity;
           await connection.query(
             'UPDATE ingredients SET quantity_in_stock = ?, updated_at = NOW() WHERE id = ?',
             [newQuantity, ingredientId]
           );
 
-          // Record transaction for audit trail (deduction)
+          // SINGLE INSERT: Record transaction for audit trail
           await connection.query(
             'INSERT INTO stock_transactions (ingredient_id, quantity, transaction_type, order_id, reason) VALUES (?, ?, ?, ?, ?)',
             [ingredientId, -requiredQuantity, 'deduction', orderId, 'Order approval']
           );
+
+          logger.debug('Stock deducted for ingredient', {
+            ingredientId,
+            ingredientName: stock[0].name,
+            deducted: requiredQuantity,
+            previousStock: availableStock,
+            newStock: newQuantity,
+            orderId,
+            timestamp
+          });
         }
 
-        // Update order status
+        // Update order status (SINGLE UPDATE)
         await connection.query(
           'UPDATE orders SET approved = 1, status = ? WHERE id = ?',
           ['preparing', orderId]
@@ -871,7 +910,7 @@ module.exports = (io) => {
 
         await connection.commit();
 
-        const guestSessionId = orderRows[0].session_id;
+        const guestSessionId = order.session_id;
         io.to(`guest-${guestSessionId}`).emit('orderApproved', {
           orderId: orderId.toString(),
           status: derivedStatus,
@@ -883,7 +922,7 @@ module.exports = (io) => {
           orderDetails: orderDetails[0]
         });
 
-        logger.info('Order approved successfully with stock deduction', {
+        logger.info('Order approved successfully with single stock deduction', {
           orderId,
           ingredientUsage: Object.fromEntries(ingredientUsage),
           guestSessionId,
@@ -896,6 +935,7 @@ module.exports = (io) => {
         await connection.rollback();
         logger.error('Error approving order with stock deduction', {
           error: err.message,
+          stack: err.stack,
           orderId,
           sessionId,
           timestamp
@@ -912,7 +952,7 @@ module.exports = (io) => {
 
   router.post('/orders/:id/cancel', async (req, res) => {
     const { id } = req.params;
-    const { restoreStock = false } = req.body; // Default to false if not provided
+    const { restoreStock = false } = req.body;
     const timestamp = new Date().toISOString();
     const sessionId = req.headers['x-session-id'] || req.sessionID;
 
@@ -926,28 +966,34 @@ module.exports = (io) => {
         logger.warn('Invalid order ID for cancellation', { id, sessionId, timestamp });
         return res.status(400).json({ error: 'Valid order ID required' });
       }
-      const [orderRows] = await db.query('SELECT session_id, status, approved FROM orders WHERE id = ?', [orderId]);
-      if (orderRows.length === 0) {
-        logger.warn('Order not found for cancellation', { orderId, sessionId, timestamp });
-        return res.status(404).json({ error: 'Order not found' });
-      }
-      if (orderRows[0].status === 'cancelled') {
-        logger.warn('Order already cancelled', { orderId, sessionId, timestamp });
-        return res.status(400).json({ error: 'Order already cancelled' });
-      }
 
       const connection = await db.getConnection();
       await connection.beginTransaction();
 
       try {
+        // CRITICAL FIX: Lock order row to prevent race conditions
+        const [orderRows] = await connection.query(
+          'SELECT id, session_id, status, approved FROM orders WHERE id = ? FOR UPDATE',
+          [orderId]
+        );
+
+        if (orderRows.length === 0) {
+          await connection.rollback();
+          logger.warn('Order not found for cancellation', { orderId, sessionId, timestamp });
+          return res.status(404).json({ error: 'Order not found' });
+        }
+
+        if (orderRows[0].status === 'cancelled') {
+          await connection.rollback();
+          logger.warn('Order already cancelled', { orderId, sessionId, timestamp });
+          return res.status(400).json({ error: 'Order already cancelled' });
+        }
+
         let ingredientUsage = null;
 
-        // Only attempt restoration if:
-        // - restoreStock explicitly requested (true)
-        // - AND order was previously approved (so deduction was likely made)
+        // Only attempt restoration if requested and order was previously approved
         if (restoreStock === true && orderRows[0].approved) {
-
-          // Prevent double restoration: check if restoration transactions already exist for this order
+          // CRITICAL FIX: Prevent double restoration
           const [existingRestorations] = await connection.query(
             'SELECT id FROM stock_transactions WHERE order_id = ? AND reason = ? LIMIT 1',
             [orderId, 'Order cancellation stock restoration']
@@ -958,17 +1004,16 @@ module.exports = (io) => {
             return res.status(400).json({ error: 'Stock already restored for this order' });
           }
 
-          // Additionally, ensure there was a deduction previously for this order
+          // Verify a deduction actually occurred
           const [deductionsExist] = await connection.query(
             'SELECT id FROM stock_transactions WHERE order_id = ? AND transaction_type = ? LIMIT 1',
             [orderId, 'deduction']
           );
+
           if (deductionsExist.length === 0) {
-            // No record of a deduction; do not attempt to restore (prevents arbitrary increases)
             logger.warn('No prior deduction found for order; skipping stock restoration', { orderId, sessionId, timestamp });
-            // We'll still continue to mark order cancelled, but no restoration performed
           } else {
-            // Recompute ingredient usage just like approval did (to restore exact quantities)
+            // Recompute ingredient usage
             ingredientUsage = new Map();
             const [orderItems] = await connection.query(
               'SELECT item_id, breakfast_id, quantity, supplement_id FROM order_items WHERE order_id = ?',
@@ -982,7 +1027,6 @@ module.exports = (io) => {
             for (const item of orderItems) {
               const { item_id, breakfast_id, quantity, supplement_id } = item;
 
-              // Menu items
               if (item_id) {
                 const [menuItemIngredients] = await connection.query(
                   'SELECT ingredient_id, quantity AS ingredient_quantity FROM menu_item_ingredients WHERE menu_item_id = ?',
@@ -994,7 +1038,6 @@ module.exports = (io) => {
                 }
               }
 
-              // Supplements
               if (supplement_id) {
                 const [supplementIngredients] = await connection.query(
                   'SELECT ingredient_id, quantity AS ingredient_quantity FROM supplement_ingredients WHERE supplement_id = ?',
@@ -1006,7 +1049,6 @@ module.exports = (io) => {
                 }
               }
 
-              // Breakfasts
               if (breakfast_id) {
                 const [breakfastIngredients] = await connection.query(
                   'SELECT ingredient_id, quantity AS ingredient_quantity FROM breakfast_ingredients WHERE breakfast_id = ?',
@@ -1019,7 +1061,6 @@ module.exports = (io) => {
               }
             }
 
-            // Breakfast options
             for (const option of breakfastOptions) {
               const [optionIngredients] = await connection.query(
                 'SELECT ingredient_id, quantity AS ingredient_quantity FROM breakfast_option_ingredients WHERE breakfast_option_id = ?',
@@ -1031,15 +1072,13 @@ module.exports = (io) => {
               }
             }
 
-            // Now perform the actual restoration: update ingredients table and insert transactions (addition)
+            // Perform restoration
             for (const [ingredientId, qtyToRestore] of ingredientUsage) {
-              // Lock the ingredient row for update to avoid race conditions
               const [stockRows] = await connection.query(
-                'SELECT id, quantity_in_stock FROM ingredients WHERE id = ? FOR UPDATE',
+                'SELECT id, name, quantity_in_stock FROM ingredients WHERE id = ? FOR UPDATE',
                 [ingredientId]
               );
               if (stockRows.length === 0) {
-                // If ingredient missing, rollback to avoid inconsistent state
                 await connection.rollback();
                 logger.warn('Ingredient not found during restoration', { ingredientId, orderId, sessionId, timestamp });
                 return res.status(400).json({ error: `Ingredient ID ${ingredientId} not found during restoration` });
@@ -1051,16 +1090,25 @@ module.exports = (io) => {
                 [newQty, ingredientId]
               );
 
-              // Insert addition transaction
               await connection.query(
                 'INSERT INTO stock_transactions (ingredient_id, quantity, transaction_type, order_id, reason) VALUES (?, ?, ?, ?, ?)',
                 [ingredientId, qtyToRestore, 'addition', orderId, 'Order cancellation stock restoration']
               );
+
+              logger.debug('Stock restored for ingredient', {
+                ingredientId,
+                ingredientName: stockRows[0].name,
+                restored: qtyToRestore,
+                previousStock: currentQty,
+                newStock: newQty,
+                orderId,
+                timestamp
+              });
             }
           }
         }
 
-        // Update order status and mark as not approved
+        // Update order status
         await connection.query('UPDATE orders SET status = ?, approved = 0 WHERE id = ?', ['cancelled', orderId]);
 
         const [orderDetails] = await connection.query(`
