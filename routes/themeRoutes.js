@@ -75,17 +75,19 @@ router.get('/theme', async (req, res) => {
         background_color: '#faf8f5',
         text_color: '#1f2937',
         site_title: 'Café Local',
+        currency: '$',
         logo_url: null,
         favicon_url: null,
       };
       await db.query(
-        'INSERT INTO themes (primary_color, secondary_color, background_color, text_color, site_title, logo_url, favicon_url, admin_id) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)',
+        'INSERT INTO themes (primary_color, secondary_color, background_color, text_color, site_title, currency, logo_url, favicon_url, admin_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)',
         [
           defaultTheme.primary_color,
           defaultTheme.secondary_color,
           defaultTheme.background_color,
           defaultTheme.text_color,
           defaultTheme.site_title,
+          defaultTheme.currency,
           defaultTheme.logo_url,
           defaultTheme.favicon_url,
         ]
@@ -103,33 +105,35 @@ router.get('/theme', async (req, res) => {
 
 // Update theme colors (admin only)
 router.put('/theme', validateAdmin, themeValidate, async (req, res) => {
-  const { primary_color, secondary_color, background_color, text_color, site_title } = req.body;
+  const { primary_color, secondary_color, background_color, text_color, site_title, currency } = req.body;
   try {
     const [existingTheme] = await db.query('SELECT id FROM themes ORDER BY updated_at DESC LIMIT 1');
     if (!existingTheme.length) {
       // Insert new theme if none exists
       await db.query(
-        'INSERT INTO themes (primary_color, secondary_color, background_color, text_color, site_title, admin_id) VALUES (?, ?, ?, ?, ?, ?)',
+        'INSERT INTO themes (primary_color, secondary_color, background_color, text_color, site_title, currency, admin_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
         [
           primary_color || '#ff6b35',
           secondary_color || '#ff8c42',
           background_color || '#faf8f5',
           text_color || '#1f2937',
           site_title || 'Café Local',
+          currency || '$',
           req.user.id,
         ]
       );
-      logger.info('New theme created', { primary_color, secondary_color, site_title });
+      logger.info('New theme created', { primary_color, secondary_color, site_title, currency });
     } else {
       // Update existing theme
       const [result] = await db.query(
-        'UPDATE themes SET primary_color = ?, secondary_color = ?, background_color = ?, text_color = ?, site_title = ?, admin_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        'UPDATE themes SET primary_color = ?, secondary_color = ?, background_color = ?, text_color = ?, site_title = ?, currency = ?, admin_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
         [
           primary_color || '#ff6b35',
           secondary_color || '#ff8c42',
           background_color || '#faf8f5',
           text_color || '#1f2937',
           site_title || 'Café Local',
+          currency || '$',
           req.user.id,
           existingTheme[0].id,
         ]
@@ -138,7 +142,7 @@ router.put('/theme', validateAdmin, themeValidate, async (req, res) => {
         logger.warn('No theme found for update', { id: existingTheme[0].id });
         return res.status(404).json({ error: 'No theme found' });
       }
-      logger.info('Theme updated', { id: existingTheme[0].id, primary_color, secondary_color, site_title });
+      logger.info('Theme updated', { id: existingTheme[0].id, primary_color, secondary_color, site_title, currency });
     }
     res.json({ message: 'Theme updated successfully' });
   } catch (error) {
@@ -189,7 +193,7 @@ router.put('/theme/branding', validateAdmin, themeValidate, logFormData, upload,
     if (!existingTheme.length) {
       // Insert new theme if none exists
       await db.query(
-        'INSERT INTO themes (logo_url, favicon_url, site_title, primary_color, secondary_color, background_color, text_color, admin_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        'INSERT INTO themes (logo_url, favicon_url, site_title, primary_color, secondary_color, background_color, text_color, currency, admin_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
         [
           logo_url,
           favicon_url,
@@ -198,6 +202,7 @@ router.put('/theme/branding', validateAdmin, themeValidate, logFormData, upload,
           '#ff8c42',
           '#faf8f5',
           '#1f2937',
+          '$',
           req.user.id,
         ]
       );
